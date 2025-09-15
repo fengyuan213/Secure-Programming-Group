@@ -9,7 +9,7 @@ from typing import Optional
 """
 This section contains helper functions
 that the envelope checker will call to decide if an incoming JSON message
-is properly formatted and safe to process
+is properly formatted and safe to process.
 """
 
 # Spec for Encodings: Binary values (keys, ciphertexts, IVs, tags, signatures) MUST be base64url (no ppadding) in JSON.
