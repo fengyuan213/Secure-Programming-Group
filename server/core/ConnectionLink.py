@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 import websockets
 from websockets.server import WebSocketServerProtocol
-from server.core.ConnectionLink import ConnectionLink
+
 from shared.envelope import Envelope
 
 from shared.log import get_logger

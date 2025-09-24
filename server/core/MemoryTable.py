@@ -8,7 +8,7 @@ Type checkers (mypy, Pyright, PyCharm, etc.) and runtime helpers (typing.get_typ
 '''
 from dataclasses import dataclass
 from typing import Optional, Dict, Literal
-from core.ConnectionLink import ConnectionLink
+from server.core.ConnectionLink import ConnectionLink
 
 # Required in-memory tables (Section 5.2)
 Location = Literal["local", str]  # "local" or a server_id like "server_123"
@@ -20,7 +20,7 @@ class ServerEndpoint:
     port: int
 
 @dataclass
-class ServerRecord:
+class ServerRecord: 
     id: str
     link: ConnectionLink
     endpoint: ServerEndpoint

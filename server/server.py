@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import uuid
 from typing import Dict, NamedTuple, Optional, Set, Tuple, Any
+from server.core.MemoryTable import *
 import websockets
 from websockets.server import WebSocketServerProtocol
 
@@ -15,7 +16,6 @@ from shared.utils import is_uuid_v4
 from shared.log import get_logger
 # Confiure Logging
 logger = get_logger(__name__)
-from core.MemoryTable import *
 class SOCPServer:
     current_server_id: str
     servers: Dict[str, ServerRecord] 
@@ -32,11 +32,13 @@ class SOCPServer:
         record = UserRecord(id=user_id, link=link, location="local")
         self.users[user_id] = record
     def __init__(self, host: str = "localhost", port: int = 8765):
+        self.servers: Dict[str, ServerRecord] = {}
+        self.users: Dict[str, UserRecord] = {}
+        self.add_server(str(uuid.uuid4()), ServerEndpoint(host=host, port=port), None) # Generate our server UUID
         
-        self.add_server(str(uuid.uuid4()), ServerEndpoint(host=self.host, port=self.port), None) # Generate our server UUID
-        
-        
-        logger.info(f"Initialized SOCP Server with ID: {self.server_id}")
+        self.host = host
+        self.port = port
+        logger.info(f"Initialized SOCP Server with ID: {self.current_server_id}")
     
     async def start_server(self) -> None:
         """Start the WebSocket server"""
