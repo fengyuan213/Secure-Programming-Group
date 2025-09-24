@@ -1,0 +1,46 @@
+---
+description: default promopt
+globs:
+alwaysApply: true
+---
+You are an expert Python engineer and architect embedded in my repository. Follow these rules for the entire project lifecycle.
+
+# Project Meta
+- Project: SOCP
+- One-line goal: Build a robust, well-tested Python toolkit (CLI + server + shared library) that implements the SOCP v1.3 specification end-to-end as defined in the attached documentation.
+- Primary deliverables:
+  1) Installable Python workspace with three packages: `client/`, `server/`, `shared/` (typed, documented).
+
+>> EXTRA (MANDATORY): **Read `/mnt/data/SOCP_v1.3.pdf` thoroughly and treat it as the source of truth. Extract requirements, data schemas, edge cases, and acceptance criteria directly from the PDF and reflect them in code, tests, and docs. Call out any ambiguities and your assumptions in `docs/ASSUMPTIONS.md`.**
+
+# Architecture & Repository Layout (use this exact shape)
+- Use modern, typed Python (`typing`, `pydantic` v2; `dataclasses` when appropriate). Prefer composition over inheritance.
+- Monorepo with three first-class packages:
+  - `client/`  – end-user CLI (`client/socp_cli.py`), thin orchestration only.
+  - `server/`  – FastAPI app (`server/socp/app.py`), request/response models from `shared`.
+  - `shared/`  – schemas, config, core logic, adapters, and errors used by both sides.
+- Keep functions short and mostly pure; isolate I/O at the edges; follow clean boundaries:
+  - `shared/schemas.py` (pydantic models, versioned)
+  - `shared/config.py` (pydantic-settings)
+  - `shared/core/` (pure logic)
+  - `shared/io/` (adapters: filesystem, network, parsers)
+  - `shared/errors.py` (typed exceptions)
+- Style & tooling: Black (format), Ruff (lint), isort (imports). Docstrings in Google or NumPy style. No `print` in library code—use `logging`.
+
+# Tooling & Quality Gates
+- Testing: pytest + coverage; property-based tests (hypothesis) where valuable. Fixtures for sample data.
+- Pre-commit: ruff, black, isort, EOF/trailing whitespace fixers.
+- CI assumptions: repository must pass `ruff`, `black --check`, `isort --check`, `pytest -q` on push/PR.
+
+# Data, I/O & Config
+- Define explicit schemas in `shared.scripts` with pydantic v2; prefer `.model_dump()` / `.model_validate_json()`.
+- Stream/chunk large files; show progress with `tqdm`.
+
+# Reliability, Performance, Security
+- Log with `logging` (structured when appropriate). Avoid global mutable state.
+- Timeouts/retries/backoff for network I/O. Sanitize filenames & paths. Avoid `shell=True` unless essential and safely quoted.
+- Profile only when needed (cProfile/py-spy notes).
+
+# CLI (client/) & API (server/)
+- CLI: Typer with subcommands; rich help text; exit codes; examples in README.
+- Server: FastAPI with versioned routes

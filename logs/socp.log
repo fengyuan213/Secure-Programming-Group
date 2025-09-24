@@ -1,0 +1,240 @@
+2025-09-24 01:27:12 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:27:12 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:27:12 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:27:12 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:27:12 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:27:12 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:27:12 | __main__                       | INFO     | Initialized SOCP Server with ID: a67d2dac-10d4-4ca2-81ed-955e6fa4e60a
+2025-09-24 01:27:12 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:27:12 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:27:14 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:27:14 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:27:14 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:27:14 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:27:14 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:27:14 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:27:14 | __main__                       | INFO     | Initialized SOCP Server with ID: a6dfdc3f-7309-41ec-956a-a5b2d646d81f
+2025-09-24 01:27:14 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:27:14 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:28:26 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:28:26 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:28:26 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:28:26 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:28:26 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:28:26 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:28:26 | __main__                       | INFO     | Initialized SOCP Server with ID: f75df79c-ecac-4c46-9ff3-46a282526a80
+2025-09-24 01:28:26 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:28:26 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:30:35 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:30:35 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:30:35 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:30:35 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:30:35 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:30:35 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:30:35 | __main__                       | INFO     | Initialized SOCP Server with ID: dde91174-dc82-4959-b17e-2400a7af718c
+2025-09-24 01:30:35 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:30:35 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:30:42 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:30:42 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:30:42 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:30:42 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:30:42 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:30:42 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:30:42 | __main__                       | INFO     | Initialized SOCP Server with ID: 5cdc0e18-6a81-44a2-b7c0-faafea269859
+2025-09-24 01:30:42 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:30:42 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:33:28 | INFO     | server.server                  | SOCP server starting on localhost:8765
+2025-09-24 01:33:28 | INFO     | client.client                  | Connecting to server
+2025-09-24 01:33:28 | DEBUG    | shared.envelope                | Validating envelope structure
+2025-09-24 01:33:28 | INFO     | server.server                  | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:33:28 | ERROR    | client.client                  | [msg=USER_HELLO] Connection failed
+2025-09-24 01:33:28 | WARNING  | shared.envelope                | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:33:28 | INFO     | __main__                       | Initialized SOCP Server with ID: a2457b85-1f46-43a5-b6f5-b751646ef9a9
+2025-09-24 01:33:28 | INFO     | __main__                       | Starting SOCP server on localhost:8765
+2025-09-24 01:33:28 | INFO     | __main__                       | SOCP server listening on ws://localhost:8765
+2025-09-24 01:33:52 | INFO     | server.server                  | SOCP server starting on localhost:8765
+2025-09-24 01:33:52 | INFO     | client.client                  | Connecting to server
+2025-09-24 01:33:52 | DEBUG    | shared.envelope                | Validating envelope structure
+2025-09-24 01:33:52 | INFO     | server.server                  | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:33:52 | ERROR    | client.client                  | [msg=USER_HELLO] Connection failed
+2025-09-24 01:33:52 | WARNING  | shared.envelope                | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:33:52 | INFO     | __main__                       | Initialized SOCP Server with ID: f92fd845-eeba-4e0d-a792-df59b60dcbd5
+2025-09-24 01:33:52 | INFO     | __main__                       | Starting SOCP server on localhost:8765
+2025-09-24 01:33:52 | INFO     | __main__                       | SOCP server listening on ws://localhost:8765
+2025-09-24 01:35:27 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:35:27 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:35:27 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:35:27 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:35:27 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:35:27 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:35:27 | __main__                       | INFO     | Initialized SOCP Server with ID: 8a27b9a2-035d-4611-a338-851aa772e558
+2025-09-24 01:35:27 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:35:27 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:36:56 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:36:56 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:36:56 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:36:56 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:36:56 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:36:56 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:36:56 | __main__                       | INFO     | Initialized SOCP Server with ID: 28d5a11a-98f9-45f6-9fba-5c71e12902cc
+2025-09-24 01:36:56 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:36:56 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:37:09 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:37:09 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:37:09 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:37:09 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:37:09 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:37:09 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:37:09 | __main__                       | INFO     | Initialized SOCP Server with ID: 1795e068-a759-48df-9c17-04de58f4dc48
+2025-09-24 01:37:09 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:37:09 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:37:24 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:37:24 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:37:24 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:37:24 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:37:24 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:37:24 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:37:24 | __main__                       | INFO     | Initialized SOCP Server with ID: ea6f2e24-ee6e-4fc3-8add-4d6d023268f0
+2025-09-24 01:37:24 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:37:24 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:37:36 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:37:36 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:37:36 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:37:36 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:37:36 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:37:36 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:37:36 | __main__                       | INFO     | Initialized SOCP Server with ID: fbddf59c-2cf5-4fcf-a838-93b8ab8a2642
+2025-09-24 01:37:36 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:37:36 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:38:10 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:38:10 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:38:10 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:38:10 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:38:10 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:38:10 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:38:10 | __main__                       | INFO     | Initialized SOCP Server with ID: 71fc58bb-f861-4e9b-b042-61417b98aac0
+2025-09-24 01:38:10 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:38:10 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:38:23 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:38:23 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:38:23 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:38:23 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:38:23 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:38:23 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:38:23 | __main__                       | INFO     | Initialized SOCP Server with ID: ccfed220-390d-4766-a4c9-f7975e7e1318
+2025-09-24 01:38:23 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:38:23 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:38:45 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:38:45 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:38:45 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:38:45 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:38:45 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:38:45 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:38:45 | __main__                       | INFO     | Initialized SOCP Server with ID: 965696b6-1e5a-4a61-abdc-7674dc2d95a9
+2025-09-24 01:38:45 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:38:45 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:38:49 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:38:49 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:38:49 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:38:49 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:38:49 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:38:49 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:38:49 | __main__                       | INFO     | Initialized SOCP Server with ID: 19359f5a-6e0d-4d13-b61e-6fccdd2db979
+2025-09-24 01:38:49 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:38:49 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:38:55 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:38:55 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:38:55 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:38:55 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:38:55 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:38:55 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:38:55 | __main__                       | INFO     | Initialized SOCP Server with ID: bd4884b0-fb24-4ce6-9abb-a6de70ec3b44
+2025-09-24 01:38:55 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:38:55 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:39:04 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:39:04 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:39:04 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:39:04 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:39:04 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:39:04 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:39:04 | __main__                       | INFO     | Initialized SOCP Server with ID: a7600793-031e-41b6-8ca4-4ab58f044be8
+2025-09-24 01:39:04 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:39:05 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:39:15 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:39:15 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:39:15 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:39:15 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:39:15 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:39:15 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:39:15 | __main__                       | INFO     | Initialized SOCP Server with ID: 84616bdc-c78c-4056-b630-7b3f4ab7de49
+2025-09-24 01:39:15 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:39:15 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:39:32 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:39:32 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:39:32 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:39:32 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:39:32 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:39:32 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:39:32 | __main__                       | INFO     | Initialized SOCP Server with ID: 09be77f8-dc2e-41f8-907d-a6f65246cdc2
+2025-09-24 01:39:32 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:39:32 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:39:43 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:39:43 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:39:43 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:39:43 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:39:43 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:39:43 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:39:43 | __main__                       | INFO     | Initialized SOCP Server with ID: 5ed7961b-9dca-4127-aeb2-b2f546988f6b
+2025-09-24 01:39:43 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:39:43 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:42:22 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:42:22 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:42:22 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:42:22 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:42:22 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:42:22 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:42:22 | __main__                       | INFO     | Initialized SOCP Server with ID: 80661f04-63db-452d-b58b-4e7b9625e79c
+2025-09-24 01:42:22 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:42:22 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:42:31 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:42:31 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:42:31 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:42:31 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:42:31 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:42:31 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:42:31 | __main__                       | INFO     | Initialized SOCP Server with ID: 6c580903-eb03-430b-a449-4a4c198af472
+2025-09-24 01:42:31 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:42:31 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:43:42 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:43:42 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:43:42 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:43:42 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:43:42 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:43:42 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:43:42 | __main__                       | INFO     | Initialized SOCP Server with ID: a28c9e9e-5e75-4f51-8dfc-d41f7aceb65e
+2025-09-24 01:43:42 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:43:42 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:44:25 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:44:25 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:44:25 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:44:25 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:44:25 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:44:25 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:44:25 | __main__                       | INFO     | Initialized SOCP Server with ID: 31b551b9-7f7b-48af-9b78-722cea1c8011
+2025-09-24 01:44:25 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:44:25 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 01:45:45 | server.server                  | INFO     | SOCP server starting on localhost:8765
+2025-09-24 01:45:45 | client.client                  | INFO     | Connecting to server
+2025-09-24 01:45:45 | shared.envelope                | DEBUG    | Validating envelope structure
+2025-09-24 01:45:45 | server.server                  | INFO     | [server=server-8... user=user-123... conn=conn-001] User connected
+2025-09-24 01:45:45 | client.client                  | ERROR    | [msg=USER_HELLO] Connection failed
+2025-09-24 01:45:45 | shared.envelope                | WARNING  | [msg=SERVER_DELIVER] Invalid signature detected
+2025-09-24 01:45:45 | __main__                       | INFO     | Initialized SOCP Server with ID: c4b9332d-d9fc-46cb-8067-3ba9c110548f
+2025-09-24 01:45:45 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 01:45:45 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 11:30:19 | __main__                       | INFO     | Initialized SOCP Server with ID: f669a889-44ba-4ece-a51b-708c6da82e16
+2025-09-24 11:30:19 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 11:30:19 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-24 11:30:25 | __main__                       | INFO     | Initialized SOCP Server with ID: 72d1219c-9db3-46b0-81a0-06de7f1f2896
+2025-09-24 11:30:25 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-24 11:30:25 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
