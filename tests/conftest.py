@@ -4,7 +4,7 @@ import asyncio, json, time, uuid, websockets
 
 def ms(): return int(time.time()*1000)
 
-async def user_hello(server_ws="ws://127.0.0.1:8765", current_server_id="3f9e8d98-2956-4ddc-a2c1-8212d4095e9b"):
+async def user_hello(server_ws="ws://127.0.0.1:8765", current_server_id="4071c714-bd14-4ac5-bc75-b2212669881b"):
     env = {
         "type": "USER_HELLO",
         "from": str(uuid.uuid4()),
@@ -44,4 +44,4 @@ async def server_hello_join(server_ws="ws://127.0.0.1:8765"):
 
 
 # change which test functon you want to run
-asyncio.run(server_hello_join())
+asyncio.run(user_hello())

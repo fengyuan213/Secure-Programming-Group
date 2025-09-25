@@ -287,3 +287,11 @@
 2025-09-25 19:43:45 | __main__                       | INFO     | Initialized SOCP Server with ID: 4071c714-bd14-4ac5-bc75-b2212669881b
 2025-09-25 19:43:45 | __main__                       | INFO     | Starting SOCP server on localhost:8765
 2025-09-25 19:43:45 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-25 19:47:11 | __main__                       | INFO     | New connection from ('127.0.0.1', 56159)
+2025-09-25 19:47:11 | __main__                       | INFO     | First message type: USER_HELLO from 2c894701-9f4e-4f49-b2d6-b8f1d5c68266
+2025-09-25 19:47:11 | __main__                       | INFO     | User 2c894701-9f4e-4f49-b2d6-b8f1d5c68266 connected with client cli-v1
+2025-09-25 19:47:11 | __main__                       | INFO     | Broadcasted USER_ADVERTISE for 2c894701-9f4e-4f49-b2d6-b8f1d5c68266
+2025-09-25 19:47:11 | __main__                       | INFO     | Cleaned up user 2c894701-9f4e-4f49-b2d6-b8f1d5c68266
+2025-09-25 19:49:55 | __main__                       | INFO     | New connection from ('127.0.0.1', 59669)
+2025-09-25 19:49:55 | __main__                       | ERROR    | Error handling first message: Invalid 'from' field: invalid
+2025-09-25 19:49:55 | __main__                       | ERROR    | Error handling connection ('127.0.0.1', 59669): Invalid 'from' field: invalid

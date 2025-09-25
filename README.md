@@ -61,3 +61,8 @@ This will:
 1. Connect as a **User** with `USER_HELLO` message
 2. Connect as a **Server** with `SERVER_HELLO_JOIN` message
 
+### running test case: conftest.py
+start server in one terminal, copy the server ID into the function, and then run the following in another terminal:
+```bash
+python tests/conftest.y
+```
