@@ -241,3 +241,31 @@
 2025-09-25 16:10:13 | __main__                       | INFO     | Initialized SOCP Server with ID: c9753437-c880-42d0-bac3-04aa10316cdf
 2025-09-25 16:10:13 | __main__                       | INFO     | Starting SOCP server on localhost:8765
 2025-09-25 16:10:13 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-25 18:46:44 | __main__                       | INFO     | Initialized SOCP Server with ID: da4fe889-836b-4d53-9197-95ca75fc77b1
+2025-09-25 18:46:44 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-25 18:46:44 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-25 18:51:40 | __main__                       | INFO     | Initialized SOCP Server with ID: 728e388b-d40f-46f6-bd2b-863c676e2c27
+2025-09-25 18:51:41 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-25 18:51:41 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-25 18:51:57 | __main__                       | INFO     | New connection from ('127.0.0.1', 65478)
+2025-09-25 18:51:57 | __main__                       | ERROR    | Error handling first message: Invalid 'to' field: <PASTE_FROM_LOGS> for type USER_HELLO
+2025-09-25 18:51:57 | __main__                       | ERROR    | Error handling connection ('127.0.0.1', 65478): Invalid 'to' field: <PASTE_FROM_LOGS> for type USER_HELLO
+2025-09-25 18:55:46 | __main__                       | INFO     | Initialized SOCP Server with ID: 5002ab36-a31b-4e51-8ffd-5b2250b18ad3
+2025-09-25 18:55:46 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-25 18:55:46 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-25 18:58:50 | __main__                       | INFO     | New connection from ('127.0.0.1', 53346)
+2025-09-25 18:58:50 | __main__                       | ERROR    | Error handling first message: 'sig' must be valid base64url
+2025-09-25 18:58:50 | __main__                       | ERROR    | Error handling connection ('127.0.0.1', 53346): 'sig' must be valid base64url
+2025-09-25 19:00:05 | __main__                       | INFO     | New connection from ('127.0.0.1', 56619)
+2025-09-25 19:00:05 | __main__                       | INFO     | First message type: USER_HELLO from e19cfe17-521e-4f1f-b0bf-bb6a17d5f193
+2025-09-25 19:00:05 | __main__                       | INFO     | User e19cfe17-521e-4f1f-b0bf-bb6a17d5f193 connected with client cli-v1
+2025-09-25 19:00:05 | __main__                       | ERROR    | Error handling first message: 'ServerRecord' object has no attribute 'send_message'
+2025-09-25 19:00:05 | __main__                       | ERROR    | Error handling connection ('127.0.0.1', 56619): 'ServerRecord' object has no attribute 'send_message'
+2025-09-25 19:03:46 | __main__                       | INFO     | Initialized SOCP Server with ID: 3f9e8d98-2956-4ddc-a2c1-8212d4095e9b
+2025-09-25 19:03:46 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-25 19:03:46 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-25 19:04:05 | __main__                       | INFO     | New connection from ('127.0.0.1', 62262)
+2025-09-25 19:04:05 | __main__                       | INFO     | First message type: USER_HELLO from 30baaf36-0fa2-4267-9717-7051e4cc8ba5
+2025-09-25 19:04:05 | __main__                       | INFO     | User 30baaf36-0fa2-4267-9717-7051e4cc8ba5 connected with client cli-v1
+2025-09-25 19:04:05 | __main__                       | INFO     | Broadcasted USER_ADVERTISE for 30baaf36-0fa2-4267-9717-7051e4cc8ba5
+2025-09-25 19:04:06 | __main__                       | INFO     | Cleaned up user 30baaf36-0fa2-4267-9717-7051e4cc8ba5

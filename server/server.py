@@ -10,10 +10,11 @@ from server.core.MemoryTable import *
 import websockets
 from websockets.server import WebSocketServerProtocol
 
-from server.core import ConnectionLink
+from server.core.ConnectionLink import ConnectionLink
 from shared.envelope import Envelope, create_envelope
 from shared.utils import is_uuid_v4
 from shared.log import get_logger
+
 # Confiure Logging
 logger = get_logger(__name__)
 class SOCPServer:
@@ -31,9 +32,17 @@ class SOCPServer:
     def add_local_user(self, user_id: str, link: ConnectionLink):
         record = UserRecord(id=user_id, link=link, location="local")
         self.users[user_id] = record
+        
     def __init__(self, host: str = "localhost", port: int = 8765):
         self.servers: Dict[str, ServerRecord] = {}
         self.users: Dict[str, UserRecord] = {}
+
+        # Initialise required in-memory tables
+        self.local_users: Dict[str, ConnectionLink] = {}
+        self.user_locations: Dict[str, str] = {}
+        self.server_addrs: Dict[str, Tuple[str, int]] = {}
+        self.all_connections: Set[ConnectionLink] = set()
+        
         self.add_server(str(uuid.uuid4()), ServerEndpoint(host=host, port=port), None) # Generate our server UUID
         
         self.host = host
@@ -91,6 +100,22 @@ class SOCPServer:
         finally:
             await self.cleanup_connection(connection)
     
+    def _iter_server_links(self):
+        """Yield ConnectionLink objects for all connected remote servers."""
+        for value in self.servers.values():
+            # value may be a ConnectionLink (post-HELLO) or a ServerRecord (bootstrap entry)
+            link = None
+            if isinstance(value, ConnectionLink):
+                link = value
+            else:
+                # Try to access .link on ServerRecord
+                try:
+                    link = value.link  # type: ignore[attr-defined]
+                except Exception:
+                    link = None
+            if link is not None:
+                yield link
+
     async def handle_first_message(self, connection: ConnectionLink) -> None:
         """
         Handle the first message to identify connection type
@@ -204,7 +229,7 @@ class SOCPServer:
         }
         welcome_envelope = create_envelope(
             "SERVER_WELCOME",
-            self.server_id,
+            self.current_server_id,
             server_id,
             welcome_payload
         )
@@ -245,14 +270,14 @@ class SOCPServer:
         """Broadcast USER_ADVERTISE to all connected servers"""
         payload = {
             "user_id": user_id,
-            "server_id": self.server_id,
+            "server_id": self.current_server_id,
             "meta": meta
         }
-        envelope = create_envelope("USER_ADVERTISE", self.server_id, "*", payload)
+        envelope = create_envelope("USER_ADVERTISE", self.current_server_id, "*", payload)
         
         # Send to all connected servers
-        for server_connection in self.servers.values():
-            await server_connection.send_message(envelope)
+        for server_link in self._iter_server_links():
+            await server_link.send_message(envelope)
         
         logger.info(f"Broadcasted USER_ADVERTISE for {user_id}")
     
@@ -266,9 +291,13 @@ class SOCPServer:
         envelope = create_envelope("SERVER_ANNOUNCE", server_id, "*", payload)
         
         # Send to all other connected servers
-        for other_server_id, server_connection in self.servers.items():
-            if other_server_id != server_id:  # Don't send to the announcing server
-                await server_connection.send_message(envelope)
+        for other_server_id, value in self.servers.items():
+            if other_server_id == server_id:
+                continue
+            # Resolve link
+            link = value if isinstance(value, ConnectionLink) else getattr(value, "link", None)
+            if link is not None:
+                await link.send_message(envelope)
         
         logger.info(f"Broadcasted SERVER_ANNOUNCE for {server_id}")
     
@@ -278,7 +307,7 @@ class SOCPServer:
             "code": error_code,
             "detail": detail
         }
-        envelope = create_envelope("ERROR", self.server_id, 
+        envelope = create_envelope("ERROR", self.current_server_id, 
                                  connection.user_id or connection.server_id or "unknown", 
                                  payload)
         await connection.send_message(envelope)
@@ -302,11 +331,11 @@ class SOCPServer:
             del self.user_locations[user_id]
         
         # Broadcast USER_REMOVE
-        payload = {"user_id": user_id, "server_id": self.server_id}
-        envelope = create_envelope("USER_REMOVE", self.server_id, "*", payload)
+        payload = {"user_id": user_id, "server_id": self.current_server_id}
+        envelope = create_envelope("USER_REMOVE", self.current_server_id, "*", payload)
         
-        for server_connection in self.servers.values():
-            await server_connection.send_message(envelope)
+        for server_link in self._iter_server_links():
+            await server_link.send_message(envelope)
         
         logger.info(f"Cleaned up user {user_id}")
     
