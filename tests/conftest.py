@@ -42,4 +42,6 @@ async def server_hello_join(server_ws="ws://127.0.0.1:8765"):
         reply = await ws.recv()  # expect SERVER_WELCOME
         print("Got reply:", reply)
 
+
+# change which test functon you want to run
 asyncio.run(server_hello_join())

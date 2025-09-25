@@ -3,6 +3,9 @@
 from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
+import os
+import json
+import tempfile
 
 import uuid
 from typing import Dict, NamedTuple, Optional, Set, Tuple, Any
@@ -37,13 +40,15 @@ class SOCPServer:
         self.servers: Dict[str, ServerRecord] = {}
         self.users: Dict[str, UserRecord] = {}
 
-        # Initialise required in-memory tables
+        # initialise required in-memory tables
         self.local_users: Dict[str, ConnectionLink] = {}
         self.user_locations: Dict[str, str] = {}
         self.server_addrs: Dict[str, Tuple[str, int]] = {}
         self.all_connections: Set[ConnectionLink] = set()
         
-        self.add_server(str(uuid.uuid4()), ServerEndpoint(host=host, port=port), None) # Generate our server UUID
+        # load or create persistent server UUID and register ourselves
+        persisted_id = self._load_or_create_server_id()
+        self.add_server(persisted_id, ServerEndpoint(host=host, port=port), None)
         
         self.host = host
         self.port = port
@@ -116,6 +121,51 @@ class SOCPServer:
             if link is not None:
                 yield link
 
+    def _state_path(self) -> str:
+        """Return path to server state file (JSON)."""
+        # Place next to this module: server/state.json
+        return os.path.join(os.path.dirname(__file__), "state.json")
+
+    def _load_or_create_server_id(self) -> str:
+        """Load persisted server_id if valid; otherwise create, persist, and return a new UUIDv4."""
+        path = self._state_path()
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                sid = data.get("server_id")
+                if isinstance(sid, str) and is_uuid_v4(sid):
+                    return sid
+        except Exception:
+            # Corrupt or unreadable state; fall through to regenerate
+            pass
+        # Generate new and persist
+        new_id = str(uuid.uuid4())
+        self._persist_server_id_atomic(new_id)
+        return new_id
+
+    def _persist_server_id_atomic(self, server_id: str) -> None:
+        """Write server_id to state.json atomically to avoid corruption."""
+        path = self._state_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = {"server_id": server_id}
+        # Write to a temp file then replace
+        dir_name = os.path.dirname(path)
+        fd, tmp_path = tempfile.mkstemp(prefix="state.", suffix=".json", dir=dir_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                json.dump(payload, tmp, separators=(",", ":"), sort_keys=True)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_path, path)
+        finally:
+            # If replace failed, ensure temp is cleaned up
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
     async def handle_first_message(self, connection: ConnectionLink) -> None:
         """
         Handle the first message to identify connection type
@@ -160,6 +210,11 @@ class SOCPServer:
         - enc_pubkey: base64url RSA-4096 encryption key (can duplicate pubkey)
         """
         user_id = envelope.from_
+
+        # Defensive: ensure UUIDv4 (Envelope validator should have enforced already)
+        if not is_uuid_v4(user_id):
+            await self.send_error(connection, "BAD_KEY", "from must be UUIDv4")
+            return
         
         # Validate user_id is not already in use locally
         if user_id in self.local_users:

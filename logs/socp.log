@@ -281,3 +281,9 @@
 2025-09-25 19:18:37 | server.core.ConnectionLink     | DEBUG    | Sent message SERVER_WELCOME to server
 2025-09-25 19:18:37 | __main__                       | INFO     | Broadcasted SERVER_ANNOUNCE for b26d6fb5-56bd-4bfa-97e7-b375db28b023
 2025-09-25 19:18:37 | __main__                       | INFO     | Cleaned up server b26d6fb5-56bd-4bfa-97e7-b375db28b023
+2025-09-25 19:42:25 | __main__                       | INFO     | Initialized SOCP Server with ID: 4071c714-bd14-4ac5-bc75-b2212669881b
+2025-09-25 19:42:25 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-25 19:42:25 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-25 19:43:45 | __main__                       | INFO     | Initialized SOCP Server with ID: 4071c714-bd14-4ac5-bc75-b2212669881b
+2025-09-25 19:43:45 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-25 19:43:45 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
