@@ -319,7 +319,43 @@ class SOCPServer:
     async def handle_server_message(self, connection: ConnectionLink, envelope: Envelope) -> None:
         """Handle messages from server connections"""  
         # TODO: Implement server message handling (USER_ADVERTISE, SERVER_DELIVER, etc.)
-        logger.info(f"Server message {envelope.type} from {connection.server_id}")
+        msg_type = envelope.type
+        from_server_id = connection.server_id or ""
+        logger.info(f"Server message {msg_type} from {from_server_id}")
+
+        # PRESENCE GOSSIP: maintain user_locations
+        if msg_type == "USER_ADVERTISE":
+            payload = envelope.payload
+            user_id = payload.get("user_id")
+            server_id = payload.get("server_id")
+            if isinstance(user_id, str) and isinstance(server_id, str):
+                #  update mapping (trusting sig verification later)
+                self.user_locations[user_id] = server_id
+                # gossip to other servers unchanged
+                for link in self._iter_server_links():
+                    if link is not connection:
+                        await link.send_message(envelope)
+            else:
+                await self.send_error(connection, "UNKNOWN_TYPE", "Malformed USER_ADVERTISE payload")
+            return
+
+        if msg_type == "USER_REMOVE":
+            payload = envelope.payload
+            user_id = payload.get("user_id")
+            server_id = payload.get("server_id")
+            if isinstance(user_id, str) and isinstance(server_id, str):
+                # Remove only if mapping still points to that server
+                if self.user_locations.get(user_id) == server_id:
+                    del self.user_locations[user_id]
+                # Gossip to other servers unchanged
+                for link in self._iter_server_links():
+                    if link is not connection:
+                        await link.send_message(envelope)
+            else:
+                await self.send_error(connection, "UNKNOWN_TYPE", "Malformed USER_REMOVE payload")
+            return
+
+        # TODO: Other server message types will be implemented later (e.g., SERVER_DELIVER)
     
     async def broadcast_user_advertise(self, user_id: str, meta: Dict[str, Any]) -> None:
         """Broadcast USER_ADVERTISE to all connected servers"""
@@ -400,8 +436,12 @@ class SOCPServer:
             del self.servers[server_id]
         if server_id in self.server_addrs:
             del self.server_addrs[server_id]
-        
-        # TODO: Update user_locations to remove references to this server
+            
+        # Remove any user_locations that point to this server as host
+        stale_users = [u for u, loc in self.user_locations.items() if loc == server_id]
+        for u in stale_users:
+            del self.user_locations[u]
+            
         # TODO: Attempt reconnection after delay
         
         logger.info(f"Cleaned up server {server_id}")

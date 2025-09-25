@@ -295,3 +295,35 @@
 2025-09-25 19:49:55 | __main__                       | INFO     | New connection from ('127.0.0.1', 59669)
 2025-09-25 19:49:55 | __main__                       | ERROR    | Error handling first message: Invalid 'from' field: invalid
 2025-09-25 19:49:55 | __main__                       | ERROR    | Error handling connection ('127.0.0.1', 59669): Invalid 'from' field: invalid
+2025-09-25 20:17:58 | __main__                       | INFO     | Initialized SOCP Server with ID: 4071c714-bd14-4ac5-bc75-b2212669881b
+2025-09-25 20:17:58 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-25 20:17:58 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-25 20:18:16 | __main__                       | INFO     | New connection from ('127.0.0.1', 55916)
+2025-09-25 20:18:16 | __main__                       | INFO     | First message type: USER_HELLO from 79ec6b82-c2ad-449a-9303-c6f650e6bcb6
+2025-09-25 20:18:16 | __main__                       | INFO     | User 79ec6b82-c2ad-449a-9303-c6f650e6bcb6 connected with client cli-v1
+2025-09-25 20:18:16 | __main__                       | INFO     | Broadcasted USER_ADVERTISE for 79ec6b82-c2ad-449a-9303-c6f650e6bcb6
+2025-09-25 20:18:17 | __main__                       | INFO     | Cleaned up user 79ec6b82-c2ad-449a-9303-c6f650e6bcb6
+2025-09-25 20:22:26 | __main__                       | INFO     | New connection from ('127.0.0.1', 51051)
+2025-09-25 20:22:26 | __main__                       | INFO     | First message type: USER_HELLO from 1f242b8d-97aa-40d7-8304-1a10f21949b6
+2025-09-25 20:22:26 | __main__                       | INFO     | User 1f242b8d-97aa-40d7-8304-1a10f21949b6 connected with client cli-v1
+2025-09-25 20:22:26 | __main__                       | INFO     | Broadcasted USER_ADVERTISE for 1f242b8d-97aa-40d7-8304-1a10f21949b6
+2025-09-25 20:22:27 | __main__                       | INFO     | Cleaned up user 1f242b8d-97aa-40d7-8304-1a10f21949b6
+2025-09-25 20:22:27 | server.server                  | INFO     | Initialized SOCP Server with ID: 4071c714-bd14-4ac5-bc75-b2212669881b
+2025-09-25 20:22:27 | server.server                  | INFO     | Starting SOCP server on 127.0.0.1:9010
+2025-09-25 20:22:27 | server.server                  | INFO     | SOCP server listening on ws://127.0.0.1:9010
+2025-09-25 20:22:27 | server.server                  | INFO     | New connection from ('127.0.0.1', 51054)
+2025-09-25 20:22:27 | server.server                  | INFO     | New connection from ('127.0.0.1', 51055)
+2025-09-25 20:22:27 | server.server                  | INFO     | First message type: SERVER_HELLO_JOIN from 67bc190b-893a-48d3-92e2-61a1c9d1ed65
+2025-09-25 20:22:27 | server.server                  | INFO     | Server 67bc190b-893a-48d3-92e2-61a1c9d1ed65 joined from 127.0.0.1:7777
+2025-09-25 20:22:27 | server.core.ConnectionLink     | DEBUG    | Sent message SERVER_WELCOME to server
+2025-09-25 20:22:27 | server.server                  | INFO     | Broadcasted SERVER_ANNOUNCE for 67bc190b-893a-48d3-92e2-61a1c9d1ed65
+2025-09-25 20:22:27 | server.server                  | INFO     | First message type: SERVER_HELLO_JOIN from 03dfe1d8-33e1-4a4f-8d43-9013df7f67e5
+2025-09-25 20:22:27 | server.server                  | INFO     | Server 03dfe1d8-33e1-4a4f-8d43-9013df7f67e5 joined from 127.0.0.1:7777
+2025-09-25 20:22:27 | server.core.ConnectionLink     | DEBUG    | Sent message SERVER_WELCOME to server
+2025-09-25 20:22:27 | server.core.ConnectionLink     | DEBUG    | Sent message SERVER_ANNOUNCE to server
+2025-09-25 20:22:27 | server.server                  | INFO     | Broadcasted SERVER_ANNOUNCE for 03dfe1d8-33e1-4a4f-8d43-9013df7f67e5
+2025-09-25 20:22:27 | server.server                  | DEBUG    | Processing USER_ADVERTISE from server
+2025-09-25 20:22:27 | server.server                  | INFO     | Server message USER_ADVERTISE from 67bc190b-893a-48d3-92e2-61a1c9d1ed65
+2025-09-25 20:22:27 | server.core.ConnectionLink     | DEBUG    | Sent message USER_ADVERTISE to server
+2025-09-25 20:22:27 | server.server                  | INFO     | Cleaned up server 03dfe1d8-33e1-4a4f-8d43-9013df7f67e5
+2025-09-25 20:22:27 | server.server                  | INFO     | Cleaned up server 67bc190b-893a-48d3-92e2-61a1c9d1ed65
