@@ -1,5 +1,7 @@
 import asyncio, json, time, uuid, websockets
 
+# REPLACE  current_server_id WITH THE SERVER ID OF THE SERVER YOU WANT TO TEST AGAINST
+
 def ms(): return int(time.time()*1000)
 
 async def user_hello(server_ws="ws://127.0.0.1:8765", current_server_id="3f9e8d98-2956-4ddc-a2c1-8212d4095e9b"):
@@ -33,11 +35,11 @@ async def server_hello_join(server_ws="ws://127.0.0.1:8765"):
             "port": 7777,
             "pubkey": "AA"
         },
-        "sig": ""
+        "sig": "AA"
     }
     async with websockets.connect(server_ws) as ws:
         await ws.send(json.dumps(env, separators=(",", ":"), sort_keys=True))
         reply = await ws.recv()  # expect SERVER_WELCOME
         print("Got reply:", reply)
 
-asyncio.run(user_hello())
+asyncio.run(server_hello_join())

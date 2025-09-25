@@ -269,3 +269,15 @@
 2025-09-25 19:04:05 | __main__                       | INFO     | User 30baaf36-0fa2-4267-9717-7051e4cc8ba5 connected with client cli-v1
 2025-09-25 19:04:05 | __main__                       | INFO     | Broadcasted USER_ADVERTISE for 30baaf36-0fa2-4267-9717-7051e4cc8ba5
 2025-09-25 19:04:06 | __main__                       | INFO     | Cleaned up user 30baaf36-0fa2-4267-9717-7051e4cc8ba5
+2025-09-25 19:14:47 | __main__                       | INFO     | Initialized SOCP Server with ID: a47684b0-b292-42ef-b03a-5aa75cfdb49f
+2025-09-25 19:14:47 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-25 19:14:47 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-25 19:15:06 | __main__                       | INFO     | New connection from ('127.0.0.1', 51111)
+2025-09-25 19:15:06 | __main__                       | ERROR    | Error handling first message: 'sig' must be valid base64url
+2025-09-25 19:15:06 | __main__                       | ERROR    | Error handling connection ('127.0.0.1', 51111): 'sig' must be valid base64url
+2025-09-25 19:18:37 | __main__                       | INFO     | New connection from ('127.0.0.1', 51473)
+2025-09-25 19:18:37 | __main__                       | INFO     | First message type: SERVER_HELLO_JOIN from b26d6fb5-56bd-4bfa-97e7-b375db28b023
+2025-09-25 19:18:37 | __main__                       | INFO     | Server b26d6fb5-56bd-4bfa-97e7-b375db28b023 joined from 127.0.0.1:7777
+2025-09-25 19:18:37 | server.core.ConnectionLink     | DEBUG    | Sent message SERVER_WELCOME to server
+2025-09-25 19:18:37 | __main__                       | INFO     | Broadcasted SERVER_ANNOUNCE for b26d6fb5-56bd-4bfa-97e7-b375db28b023
+2025-09-25 19:18:37 | __main__                       | INFO     | Cleaned up server b26d6fb5-56bd-4bfa-97e7-b375db28b023
