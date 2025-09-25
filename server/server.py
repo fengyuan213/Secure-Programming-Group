@@ -37,14 +37,14 @@ class SOCPServer:
         self.users[user_id] = record
         
     def __init__(self, host: str = "localhost", port: int = 8765):
-        self.servers: Dict[str, ServerRecord] = {}
-        self.users: Dict[str, UserRecord] = {}
+        self.servers: Dict[str, ServerRecord] = {} # Map of remote server_id → record for that server. Used to track connected servers and their links.
+        self.users: Dict[str, UserRecord] = {} # Map of local user_id → record. High-level registry of users known to this server (locals primarily).
 
         # initialise required in-memory tables
-        self.local_users: Dict[str, ConnectionLink] = {}
-        self.user_locations: Dict[str, str] = {}
-        self.server_addrs: Dict[str, Tuple[str, int]] = {}
-        self.all_connections: Set[ConnectionLink] = set()
+        self.local_users: Dict[str, ConnectionLink] = {} # Map of local user_id → ConnectionLink. Active WebSocket connections for locally attached users; used to deliver frames to local clients.
+        self.user_locations: Dict[str, str] = {} # Map of user_id → "local" or hosting server_id. Network directory used for routing (decides local deliver vs forward to a remote server).
+        self.server_addrs: Dict[str, Tuple[str, int]] = {} # Map of server_id → (host, port). Known advertised addresses for servers; used for reconnects and bootstrap
+        self.all_connections: Set[ConnectionLink] = set() #  Set of all ConnectionLink objects (both users and servers). Useful for lifecycle management and cleanup.
         
         # load or create persistent server UUID and register ourselves
         persisted_id = self._load_or_create_server_id()
