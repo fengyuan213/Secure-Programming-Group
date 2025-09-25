@@ -46,3 +46,5 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints
+
+.cursor/

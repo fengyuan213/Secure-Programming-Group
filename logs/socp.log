@@ -238,3 +238,6 @@
 2025-09-24 11:30:25 | __main__                       | INFO     | Initialized SOCP Server with ID: 72d1219c-9db3-46b0-81a0-06de7f1f2896
 2025-09-24 11:30:25 | __main__                       | INFO     | Starting SOCP server on localhost:8765
 2025-09-24 11:30:25 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
+2025-09-25 16:10:13 | __main__                       | INFO     | Initialized SOCP Server with ID: c9753437-c880-42d0-bac3-04aa10316cdf
+2025-09-25 16:10:13 | __main__                       | INFO     | Starting SOCP server on localhost:8765
+2025-09-25 16:10:13 | __main__                       | INFO     | SOCP server listening on ws://localhost:8765
