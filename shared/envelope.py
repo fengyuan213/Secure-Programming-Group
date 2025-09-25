@@ -134,13 +134,13 @@ def _validate_to_field(to_field: str, msg_type: str) -> bool:
     return is_uuid_v4(to_field)
 
 def create_envelope(msg_type: str, from_id: str, to_id: str, payload: Dict[str, Any], 
-                   signature: Optional[str] = None) -> Envelope:
-    """Helper to create a new envelope with current timestamp"""
+                   signature: Optional[str] = None, ts: Optional[int] = None) -> Envelope:
+    """Helper to create a new envelope with timestamp (now if not provided)"""
     return Envelope(
         type=msg_type,
         from_=from_id,
         to=to_id,
-        ts=int(time.time() * 1000),  # Unix timestamp in milliseconds
+        ts=int(time.time() * 1000) if ts is None else ts,
         payload=payload,
         sig=signature
     )
