@@ -1,0 +1,10 @@
+bootstrap_servers:
+  - host: "192.0.1.2"
+    port: 12345
+    pubkey: "BASE64URL(RSA-4096-PUB)"
+  - host: "198.50.100.3"
+    port: 5432
+    pubkey: "BASE64URL(RSA-4096-PUB)"
+  - host: "203.0.113.21"
+    port: 1212
+    pubkey: "BASE64URL(RSA-4096-PUB)"

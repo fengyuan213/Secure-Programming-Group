@@ -11,6 +11,7 @@ from .utils import is_uuid_v4, is_base64url, is_ipv4_hostport
 _ALLOW_UNSIGNED_TYPES: Set[str] = {
     "USER_HELLO",
     "SERVER_HELLO_JOIN",
+    "SERVER_HELLO_LINK",
     "SERVER_WELCOME",
     "SERVER_ANNOUNCE",
 }
@@ -79,10 +80,6 @@ class Envelope:
         if not _validate_to_field(data['to'], data['type']):
             raise ValueError(f"Invalid 'to' field: {data['to']} for type {data['type']}")
         
-        # Check if signature is required but missing
-        if data['type'] not in _ALLOW_UNSIGNED_TYPES and sig is None:
-            raise ValueError(f"Message type '{data['type']}' requires signature")
-        
         # Validate signature if present
         sig = data.get('sig')
         if sig is not None and not isinstance(sig, str):
@@ -91,6 +88,10 @@ class Envelope:
         # Validate signature format if present
         if sig is not None and not is_base64url(sig):
             raise ValueError("'sig' must be valid base64url")
+
+        # Check if signature is required but missing
+        if data['type'] not in _ALLOW_UNSIGNED_TYPES and sig is None:
+            raise ValueError(f"Message type '{data['type']}' requires signature")
         
         return cls(
             type=data['type'],
