@@ -42,6 +42,11 @@ python -m server.server
 # Run the test client (from project root directory, in another terminal)
 python -m client.client
 ```
+
+on startup, you may see 'bootstrap failed' messages. This is normal, it is attempting to connect to the servers listed in the bootstrap.yaml file, and since those servers are not running, bootstrap will fail.
+
+To test the bootstrap functionality, you need to clone the folder and then run run_2nd_server.py inside that directory. full guide is in tests/bootstrap_guide.md
+
 #### Production using Installed Package (if you used pip install -e .)
 
 ```bash
@@ -61,3 +66,6 @@ This will:
 1. Connect as a **User** with `USER_HELLO` message
 2. Connect as a **Server** with `SERVER_HELLO_JOIN` message
 
+### Testing bootstrap (Server ↔ Server Protocol)
+full guide is in tests/bootstrap_guide.md
+```
