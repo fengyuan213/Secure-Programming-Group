@@ -54,6 +54,7 @@ class SOCPServer:
         self.server_addrs: Dict[str, Tuple[str, int]] = {} # Map of server_id → (host, port). Known advertised addresses for servers; used for reconnects and bootstrap
         self.server_pubkeys: Dict[str, str] = {} # Map of server_id → pinned pubkey as advertised in welcome/broadcast frames.
         self.all_connections: Set[ConnectionLink] = set() #  Set of all ConnectionLink objects (both users and servers). Useful for lifecycle management and cleanup.
+        self._background_tasks: Set[asyncio.Task] = set()
 
         # load or create persistent server UUID and register ourselves
         self.local_pubkey = "AA"
@@ -63,7 +64,16 @@ class SOCPServer:
         self.host = host
         self.port = port
         logger.info(f"Initialized SOCP Server with ID: {self.current_server_id}")
-    
+
+    def _track_background_task(self, task: asyncio.Task) -> None:
+        """Keep a strong reference to background tasks until completion."""
+        self._background_tasks.add(task)
+
+        def _discard(_task: asyncio.Task) -> None:
+            self._background_tasks.discard(_task)
+
+        task.add_done_callback(_discard)
+
     async def start_server(self) -> None:
         """Start the WebSocket server"""
         logger.info(f"Starting SOCP server on {self.host}:{self.port}")
@@ -82,8 +92,11 @@ class SOCPServer:
             # Keep server running
             try:
                 await asyncio.Future()  # Run forever
+            except asyncio.CancelledError as exc:
+                logger.info("Server task cancelled")
+                raise RuntimeError("Server cancelled") from exc
             finally:
-                for t in (bootstrap_task, connect_task):
+                for t in (*self._background_tasks, bootstrap_task, connect_task):
                     t.cancel()
                     with suppress(asyncio.CancelledError):
                         await t
@@ -115,7 +128,12 @@ class SOCPServer:
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
                     # Send error response if possible
-                    await self.send_error(connection, "UNKNOWN_TYPE", str(e))
+                    await self.send_error(
+                        connection,
+                        "UNKNOWN_TYPE",
+                        str(e),
+                        to_id=connection.server_id or connection.user_id,
+                    )
                     
         except websockets.exceptions.ConnectionClosed:
             logger.info(f"Connection {remote_addr} closed")
@@ -138,7 +156,31 @@ class SOCPServer:
                 except Exception:
                     link = None
             if link is not None:
+                logger.debug(
+                    "Iter server link -> %s", getattr(link, "server_id", None)
+                )
                 yield link
+
+    def _verify_server_signature(self, server_id: str, envelope: Envelope) -> bool:
+        """Best-effort signature check using pinned pubkeys from bootstrap/HELLO flows."""
+        if not is_uuid_v4(server_id):
+            return False
+        # Local server messages are trusted (we generated them)
+        if server_id == self.current_server_id:
+            return True
+        expected_sig = self.server_pubkeys.get(server_id)
+        if not expected_sig:
+            logger.warning("No pubkey on record for server %s", server_id)
+            return False
+        if envelope.sig != expected_sig:
+            logger.warning(
+                "Signature mismatch for %s: expected %s got %s",
+                server_id,
+                expected_sig,
+                envelope.sig,
+            )
+            return False
+        return True
 
     def _state_path(self) -> str:
         """Return path to server state file (JSON)."""
@@ -303,11 +345,15 @@ class SOCPServer:
             existing = self.servers.get(server_id)
             if isinstance(existing, ConnectionLink):
                 continue
+            link: Optional[ConnectionLink] = None
             try:
                 url = f"ws://{h}:{p}"
                 logger.info(f"Connecting to server {server_id} at {h}:{p}")
                 ws = await websockets.connect(url)
                 link = ConnectionLink(ws, connection_type="server")
+                link.server_id = server_id
+                link.identified = True
+                self.all_connections.add(link)
                 # Identify ourselves with SERVER_HELLO_LINK (to = remote server_id)
                 link_env = create_envelope(
                     "SERVER_HELLO_LINK",
@@ -319,12 +365,34 @@ class SOCPServer:
                 await link.send_message(link_env)
                 # Optional: await welcome
                 with suppress(asyncio.TimeoutError):
-                    _ = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                    initial = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                    await self.process_message(link, initial)
                 # Register link
+                link.connection_type = "server"
                 self.servers[server_id] = link
+                reader = asyncio.create_task(self._run_server_link(link))
+                self._track_background_task(reader)
                 logger.info(f"Connected and linked to server {server_id} at {h}:{p}")
             except Exception as e:
                 logger.debug(f"Connect to {server_id}@{h}:{p} failed: {e}")
+                if link and link in self.all_connections:
+                    self.all_connections.discard(link)
+                if link is not None:
+                    with suppress(Exception):
+                        await link.close()
+
+    async def _run_server_link(self, link: ConnectionLink) -> None:
+        """Continuously read frames from an outbound server link."""
+        try:
+            while True:
+                message = await link.websocket.recv()
+                await self.process_message(link, message)
+        except websockets.exceptions.ConnectionClosed:
+            logger.info("Server link %s closed", getattr(link, "server_id", None))
+        except Exception as exc:
+            logger.error("Error on server link %s: %s", getattr(link, "server_id", None), exc)
+        finally:
+            await self.cleanup_connection(link)
 
     async def handle_first_message(self, connection: ConnectionLink) -> None:
         """
@@ -375,20 +443,20 @@ class SOCPServer:
 
         # Defensive: ensure UUIDv4 (Envelope validator should have enforced already)
         if not is_uuid_v4(user_id):
-            await self.send_error(connection, "BAD_KEY", "from must be UUIDv4")
+            await self.send_error(connection, "BAD_KEY", "from must be UUIDv4", to_id=envelope.from_)
             return
         
         # Validate user_id is not already in use locally
         if user_id in self.local_users:
             logger.warning(f"User ID {user_id} already in use")
-            await self.send_error(connection, "NAME_IN_USE", f"User {user_id} already connected")
+            await self.send_error(connection, "NAME_IN_USE", f"User {user_id} already connected", to_id=user_id)
             return
         
         # Validate payload structure
         required_fields = {"client", "pubkey", "enc_pubkey"}
         if not all(field in envelope.payload for field in required_fields):
             missing = required_fields - set(envelope.payload.keys())
-            await self.send_error(connection, "BAD_KEY", f"Missing required fields: {missing}")
+            await self.send_error(connection, "BAD_KEY", f"Missing required fields: {missing}", to_id=user_id)
             return
         
         # Register the user
@@ -398,6 +466,8 @@ class SOCPServer:
         
         self.local_users[user_id] = connection
         self.user_locations[user_id] = "local"
+        # Maintain unified user table for presence tracking
+        self.add_local_user(user_id, connection)
         
         logger.info(f"User {user_id} connected with client {envelope.payload['client']}")
         
@@ -425,7 +495,7 @@ class SOCPServer:
         required_fields = {"host", "port", "pubkey"}
         if not all(field in envelope.payload for field in required_fields):
             missing = required_fields - set(envelope.payload.keys())
-            await self.send_error(connection, "BAD_KEY", f"Missing required fields: {missing}")
+            await self.send_error(connection, "BAD_KEY", f"Missing required fields: {missing}", to_id=envelope.from_)
             return
 
         # Assign server ID ensuring uniqueness as per spec
@@ -479,7 +549,7 @@ class SOCPServer:
         required_fields = {"host", "port", "pubkey"}
         if not all(field in envelope.payload for field in required_fields):
             missing = required_fields - set(envelope.payload.keys())
-            await self.send_error(connection, "BAD_KEY", f"Missing required fields: {missing}")
+            await self.send_error(connection, "BAD_KEY", f"Missing required fields: {missing}", to_id=envelope.from_)
             return
         # Register/replace link
         connection.connection_type = "server"
@@ -487,6 +557,7 @@ class SOCPServer:
         connection.identified = True
         self.servers[server_id] = connection
         self.server_addrs[server_id] = (envelope.payload["host"], envelope.payload["port"])
+        self.server_pubkeys[server_id] = envelope.payload.get("pubkey", "")
         logger.info(f"Linked server {server_id} at {envelope.payload['host']}:{envelope.payload['port']}")
     
     async def process_message(self, connection: ConnectionLink, message: str) -> None:
@@ -505,7 +576,12 @@ class SOCPServer:
                 
         except Exception as e:
             logger.error(f"Error processing message: {e}")
-            await self.send_error(connection, "UNKNOWN_TYPE", str(e))
+            await self.send_error(
+                connection,
+                "UNKNOWN_TYPE",
+                str(e),
+                to_id=connection.server_id or connection.user_id,
+            )
     
     async def handle_user_message(self, connection: ConnectionLink, envelope: Envelope) -> None:
         """Handle messages from user connections"""
@@ -516,39 +592,67 @@ class SOCPServer:
         """Handle messages from server connections"""  
         # TODO: Implement server message handling (USER_ADVERTISE, SERVER_DELIVER, etc.)
         msg_type = envelope.type
-        from_server_id = connection.server_id or ""
-        logger.info(f"Server message {msg_type} from {from_server_id}")
+        origin_server_id = envelope.from_
+        logger.info(
+            "Server message %s from %s via link %s",
+            msg_type,
+            origin_server_id,
+            connection.server_id,
+        )
 
         # PRESENCE GOSSIP: maintain user_locations
-        if msg_type == "USER_ADVERTISE":
+        if msg_type in {"USER_ADVERTISE", "USER_REMOVE"}:
             payload = envelope.payload
             user_id = payload.get("user_id")
             server_id = payload.get("server_id")
-            if isinstance(user_id, str) and isinstance(server_id, str):
-                #  update mapping (trusting sig verification later)
-                self.user_locations[user_id] = server_id
-                # gossip to other servers unchanged
-                for link in self._iter_server_links():
-                    if link is not connection:
-                        await link.send_message(envelope)
-            else:
-                await self.send_error(connection, "UNKNOWN_TYPE", "Malformed USER_ADVERTISE payload")
-            return
 
-        if msg_type == "USER_REMOVE":
-            payload = envelope.payload
-            user_id = payload.get("user_id")
-            server_id = payload.get("server_id")
-            if isinstance(user_id, str) and isinstance(server_id, str):
-                # Remove only if mapping still points to that server
+            if not (isinstance(user_id, str) and isinstance(server_id, str)):
+                await self.send_error(
+                    connection,
+                    "UNKNOWN_TYPE",
+                    f"Malformed {msg_type} payload",
+                    to_id=envelope.from_,
+                )
+                return
+
+            # Ensure we trust the sending server before mutating shared state
+            if not self._verify_server_signature(origin_server_id, envelope):
+                logger.warning(
+                    "Rejected %s from %s due to signature mismatch",
+                    msg_type,
+                    origin_server_id,
+                )
+                return
+
+            if server_id != origin_server_id:
+                logger.debug(
+                    "Forwarded %s claims host %s while signed by %s", msg_type, server_id, origin_server_id
+                )
+
+            if msg_type == "USER_ADVERTISE":
+                # Advertise: map the user to the announced hosting server
+                self.user_locations[user_id] = server_id
+                self.users[user_id] = UserRecord(id=user_id, link=None, location=server_id)
+            else:
+                # USER_REMOVE: only delete if mapping still matches the sender's claim
                 if self.user_locations.get(user_id) == server_id:
                     del self.user_locations[user_id]
-                # Gossip to other servers unchanged
-                for link in self._iter_server_links():
-                    if link is not connection:
-                        await link.send_message(envelope)
-            else:
-                await self.send_error(connection, "UNKNOWN_TYPE", "Malformed USER_REMOVE payload")
+                if user_id in self.users and self.users[user_id].location == server_id:
+                    del self.users[user_id]
+
+            # Gossip to other connected servers unchanged
+            for link in self._iter_server_links():
+                if link is connection:
+                    continue
+                if link.server_id and link.server_id == origin_server_id:
+                    continue
+                logger.debug(
+                    "Forwarding %s for %s to server %s",
+                    msg_type,
+                    user_id,
+                    link.server_id,
+                )
+                await link.send_message(envelope)
             return
 
         # TODO: Other server message types will be implemented later (e.g., SERVER_DELIVER)
@@ -560,7 +664,13 @@ class SOCPServer:
             "server_id": self.current_server_id,
             "meta": meta
         }
-        envelope = create_envelope("USER_ADVERTISE", self.current_server_id, "*", payload)
+        envelope = create_envelope(
+            "USER_ADVERTISE",
+            self.current_server_id,
+            "*",
+            payload,
+            signature=self.local_pubkey,
+        )
         
         # Send to all connected servers
         for server_link in self._iter_server_links():
@@ -592,15 +702,27 @@ class SOCPServer:
         
         logger.info(f"Broadcasted SERVER_ANNOUNCE for {server_id}")
     
-    async def send_error(self, connection: ConnectionLink, error_code: str, detail: str) -> None:
+    async def send_error(
+        self,
+        connection: ConnectionLink,
+        error_code: str,
+        detail: str,
+        *,
+        to_id: Optional[str] = None,
+    ) -> None:
         """Send ERROR message to connection"""
-        payload = {
-            "code": error_code,
-            "detail": detail
-        }
-        envelope = create_envelope("ERROR", self.current_server_id, 
-                                 connection.user_id or connection.server_id or "unknown", 
-                                 payload)
+        target = to_id or connection.user_id or connection.server_id
+        if not target:
+            logger.warning("Cannot send ERROR %s: no recipient", error_code)
+            return
+        payload = {"code": error_code, "detail": detail}
+        envelope = create_envelope(
+            "ERROR",
+            self.current_server_id,
+            target,
+            payload,
+            signature=self.local_pubkey,
+        )
         await connection.send_message(envelope)
     
     async def cleanup_connection(self, connection: ConnectionLink) -> None:
@@ -620,10 +742,18 @@ class SOCPServer:
             del self.local_users[user_id]
         if user_id in self.user_locations:
             del self.user_locations[user_id]
+        if user_id in self.users:
+            del self.users[user_id]
         
         # Broadcast USER_REMOVE
         payload = {"user_id": user_id, "server_id": self.current_server_id}
-        envelope = create_envelope("USER_REMOVE", self.current_server_id, "*", payload)
+        envelope = create_envelope(
+            "USER_REMOVE",
+            self.current_server_id,
+            "*",
+            payload,
+            signature=self.local_pubkey,
+        )
         
         for server_link in self._iter_server_links():
             await server_link.send_message(envelope)
