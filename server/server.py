@@ -8,6 +8,7 @@ import json
 import tempfile
 from pathlib import Path
 from contextlib import suppress
+import time
 
 import uuid
 from typing import Dict, NamedTuple, Optional, Set, Tuple, Any
@@ -44,7 +45,14 @@ class SOCPServer:
         record = UserRecord(id=user_id, link=link, location="local")
         self.users[user_id] = record
         
-    def __init__(self, host: str = "localhost", port: int = 8765):
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 8765,
+        *,
+        heartbeat_interval: float = 15.0,
+        heartbeat_timeout: float = 45.0,
+    ):
         self.servers: Dict[str, ServerRecord] = {} # Map of remote server_id → record for that server. Used to track connected servers and their links.
         self.users: Dict[str, UserRecord] = {} # Map of local user_id → record. High-level registry of users known to this server (locals primarily).
 
@@ -55,6 +63,10 @@ class SOCPServer:
         self.server_pubkeys: Dict[str, str] = {} # Map of server_id → pinned pubkey as advertised in welcome/broadcast frames.
         self.all_connections: Set[ConnectionLink] = set() #  Set of all ConnectionLink objects (both users and servers). Useful for lifecycle management and cleanup.
         self._background_tasks: Set[asyncio.Task] = set()
+
+        self.heartbeat_interval = heartbeat_interval
+        self.heartbeat_timeout = heartbeat_timeout
+
 
         # load or create persistent server UUID and register ourselves
         self.local_pubkey = "AA"
@@ -87,8 +99,9 @@ class SOCPServer:
         ):
             logger.info(f"SOCP server listening on ws://{self.host}:{self.port}")
             # Kick off bootstrap and outbound connection maintenance in background
-            bootstrap_task = asyncio.create_task(self.bootstrap())
-            connect_task = asyncio.create_task(self._connect_loop())
+            for coroutine in (self.bootstrap(), self._connect_loop(), self._health_loop()):
+                task = asyncio.create_task(coroutine)
+                self._track_background_task(task)
             # Keep server running
             try:
                 await asyncio.Future()  # Run forever
@@ -96,10 +109,11 @@ class SOCPServer:
                 logger.info("Server task cancelled")
                 raise RuntimeError("Server cancelled") from exc
             finally:
-                for t in (*self._background_tasks, bootstrap_task, connect_task):
-                    t.cancel()
+                for task in list(self._background_tasks):
+                    task.cancel()
+
                     with suppress(asyncio.CancelledError):
-                        await t
+                        await task
     
     async def handle_connection(self, websocket: WebSocketServerProtocol, path: str) -> None:
         """
@@ -113,6 +127,7 @@ class SOCPServer:
         # NOT FINISHED SKETON ONLY
         connection = ConnectionLink(websocket)
         self.all_connections.add(connection)
+        connection.last_seen = time.monotonic()
         
         remote_addr = websocket.remote_address
         logger.info(f"New connection from {remote_addr}")
@@ -124,6 +139,7 @@ class SOCPServer:
             # Continue handling messages for identified connection
             async for message in websocket:
                 try:
+                    connection.last_seen = time.monotonic()
                     await self.process_message(connection, message)
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
@@ -160,6 +176,14 @@ class SOCPServer:
                     "Iter server link -> %s", getattr(link, "server_id", None)
                 )
                 yield link
+
+    def _resolve_server_link(self, server_id: str) -> Optional[ConnectionLink]:
+        """Return the ConnectionLink for the given server_id if connected."""
+        entry = self.servers.get(server_id)
+        if isinstance(entry, ConnectionLink):
+            return entry
+        return getattr(entry, "link", None)
+
 
     def _verify_server_signature(self, server_id: str, envelope: Envelope) -> bool:
         """Best-effort signature check using pinned pubkeys from bootstrap/HELLO flows."""
@@ -336,6 +360,40 @@ class SOCPServer:
                 logger.warning(f"connect_to_known_servers error: {e}")
             await asyncio.sleep(2)
 
+    async def _health_loop(self) -> None:
+        """Periodically send heartbeats and close stale server links."""
+        while True:
+            await asyncio.sleep(self.heartbeat_interval)
+            now = time.monotonic()
+            stale_links: list[ConnectionLink] = []
+            for link in list(self._iter_server_links()):
+                server_id = getattr(link, "server_id", None)
+                if not server_id or server_id == self.current_server_id:
+                    continue
+                last_seen = getattr(link, "last_seen", now)
+                if now - last_seen >= self.heartbeat_timeout:
+                    stale_links.append(link)
+                    continue
+                heartbeat = create_envelope(
+                    "HEARTBEAT",
+                    self.current_server_id,
+                    server_id,
+                    {},
+                    signature=self.local_pubkey,
+                )
+                await link.send_message(heartbeat)
+            for link in stale_links:
+                logger.warning(
+                    "Closing stale server link %s after %.2fs of inactivity",
+                    getattr(link, "server_id", None),
+                    now - getattr(link, "last_seen", now),
+                )
+                await self.cleanup_connection(
+                    link,
+                    close_code=1011,
+                    close_reason="health timeout",
+                )
+
     async def connect_to_known_servers(self) -> None:
         """Attempt outbound connections to all entries in server_addrs that aren't connected."""
         for server_id, (h, p) in list(self.server_addrs.items()):
@@ -354,6 +412,8 @@ class SOCPServer:
                 link.server_id = server_id
                 link.identified = True
                 self.all_connections.add(link)
+                link.last_seen = time.monotonic()
+
                 # Identify ourselves with SERVER_HELLO_LINK (to = remote server_id)
                 link_env = create_envelope(
                     "SERVER_HELLO_LINK",
@@ -366,6 +426,8 @@ class SOCPServer:
                 # Optional: await welcome
                 with suppress(asyncio.TimeoutError):
                     initial = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                    link.last_seen = time.monotonic()
+
                     await self.process_message(link, initial)
                 # Register link
                 link.connection_type = "server"
@@ -386,6 +448,8 @@ class SOCPServer:
         try:
             while True:
                 message = await link.websocket.recv()
+                link.last_seen = time.monotonic()
+
                 await self.process_message(link, message)
         except websockets.exceptions.ConnectionClosed:
             logger.info("Server link %s closed", getattr(link, "server_id", None))
@@ -405,10 +469,11 @@ class SOCPServer:
         try:
             # Wait for first message with timeout
             first_message = await asyncio.wait_for(
-                connection.websocket.recv(), 
+                connection.websocket.recv(),
                 timeout=30.0  # 30 second timeout for first message
             )
-            
+            connection.last_seen = time.monotonic()
+
             # Parse the message
             envelope = Envelope.from_json(first_message)
             logger.info(f"First message type: {envelope.type} from {envelope.from_}")
@@ -585,8 +650,123 @@ class SOCPServer:
     
     async def handle_user_message(self, connection: ConnectionLink, envelope: Envelope) -> None:
         """Handle messages from user connections"""
-        # TODO: Implement user message handling (MSG_DIRECT, MSG_PUBLIC_CHANNEL, etc.)
-        logger.info(f"User message {envelope.type} from {connection.user_id}")
+        msg_type = envelope.type
+        if msg_type != "MSG_DIRECT":
+            logger.warning("Unsupported user message type %s", msg_type)
+            await self.send_error(
+                connection,
+                "UNSUPPORTED",
+                f"Unhandled user message type {msg_type}",
+                to_id=connection.user_id,
+            )
+            return
+
+        sender_id = connection.user_id
+        if sender_id is None or sender_id != envelope.from_:
+            await self.send_error(
+                connection,
+                "BAD_SENDER",
+                "Envelope sender mismatch",
+                to_id=envelope.from_,
+            )
+            return
+
+        recipient_id = envelope.to
+        if not is_uuid_v4(recipient_id):
+            await self.send_error(
+                connection,
+                "BAD_RECIPIENT",
+                "Recipient must be UUIDv4",
+                to_id=sender_id,
+            )
+            return
+
+        payload = envelope.payload
+        required_fields = {
+            "ciphertext",
+            "iv",
+            "tag",
+            "wrapped_key",
+            "sender_pub",
+            "content_sig",
+        }
+        if not required_fields.issubset(payload.keys()):
+            missing = required_fields - set(payload.keys())
+            await self.send_error(
+                connection,
+                "BAD_PAYLOAD",
+                f"Missing fields: {sorted(missing)}",
+                to_id=sender_id,
+            )
+            return
+
+        base_payload = {
+            "ciphertext": payload["ciphertext"],
+            "iv": payload["iv"],
+            "tag": payload["tag"],
+            "wrapped_key": payload["wrapped_key"],
+            "sender": payload.get("sender", sender_id),
+            "sender_pub": payload["sender_pub"],
+            "content_sig": payload["content_sig"],
+        }
+
+        # Prefer authoritative routing table, fall back to live local link check.
+        location = self.user_locations.get(recipient_id)
+        if location == "local" or recipient_id in self.local_users:
+            local_link = self.local_users.get(recipient_id)
+            if not local_link:
+                await self.send_error(
+                    connection,
+                    "NO_ROUTE",
+                    f"Recipient {recipient_id} not connected",
+                    to_id=sender_id,
+                )
+                return
+            deliver_env = create_envelope(
+                "USER_DELIVER",
+                self.current_server_id,
+                recipient_id,
+                base_payload,
+                signature=self.local_pubkey,
+            )
+            await local_link.send_message(deliver_env)
+            logger.info("Delivered direct message from %s to local user %s", sender_id, recipient_id)
+            return
+
+        if isinstance(location, str) and is_uuid_v4(location):
+            server_link = self._resolve_server_link(location)
+            if not server_link:
+                await self.send_error(
+                    connection,
+                    "NO_ROUTE",
+                    f"No server link for {location}",
+                    to_id=sender_id,
+                )
+                return
+
+            server_payload = {"user_id": recipient_id, **base_payload}
+            server_env = create_envelope(
+                "SERVER_DELIVER",
+                self.current_server_id,
+                location,
+                server_payload,
+                signature=self.local_pubkey,
+            )
+            await server_link.send_message(server_env)
+            logger.info(
+                "Forwarded message from %s to remote user %s via server %s",
+                sender_id,
+                recipient_id,
+                location,
+            )
+            return
+
+        await self.send_error(
+            connection,
+            "NO_ROUTE",
+            f"No route to {recipient_id}",
+            to_id=sender_id,
+        )
     
     async def handle_server_message(self, connection: ConnectionLink, envelope: Envelope) -> None:
         """Handle messages from server connections"""  
@@ -599,6 +779,12 @@ class SOCPServer:
             origin_server_id,
             connection.server_id,
         )
+
+        if msg_type == "HEARTBEAT":
+            connection.last_seen = time.monotonic()
+            logger.debug("Heartbeat received from %s", origin_server_id)
+            return
+
 
         # PRESENCE GOSSIP: maintain user_locations
         if msg_type in {"USER_ADVERTISE", "USER_REMOVE"}:
@@ -655,7 +841,85 @@ class SOCPServer:
                 await link.send_message(envelope)
             return
 
-        # TODO: Other server message types will be implemented later (e.g., SERVER_DELIVER)
+        if msg_type == "SERVER_DELIVER":
+            if not self._verify_server_signature(origin_server_id, envelope):
+                logger.warning("SERVER_DELIVER failed signature from %s", origin_server_id)
+                return
+
+            payload = envelope.payload
+            user_id = payload.get("user_id")
+            if not isinstance(user_id, str) or not is_uuid_v4(user_id):
+                await self.send_error(
+                    connection,
+                    "BAD_PAYLOAD",
+                    "SERVER_DELIVER missing valid user_id",
+                    to_id=origin_server_id,
+                )
+                return
+
+            target_location = self.user_locations.get(user_id)
+            if target_location == "local" or user_id in self.local_users:
+                local_link = self.local_users.get(user_id)
+                if not local_link:
+                    logger.warning("SERVER_DELIVER for %s but user not connected", user_id)
+                    return
+                required_fields = {
+                    "ciphertext",
+                    "iv",
+                    "tag",
+                    "wrapped_key",
+                    "sender",
+                    "sender_pub",
+                    "content_sig",
+                }
+                if not required_fields.issubset(payload.keys()):
+                    await self.send_error(
+                        connection,
+                        "BAD_PAYLOAD",
+                        "SERVER_DELIVER missing ciphertext fields",
+                        to_id=origin_server_id,
+                    )
+                    return
+                deliver_payload = {
+                    "ciphertext": payload["ciphertext"],
+                    "iv": payload["iv"],
+                    "tag": payload["tag"],
+                    "wrapped_key": payload["wrapped_key"],
+                    "sender": payload["sender"],
+                    "sender_pub": payload["sender_pub"],
+                    "content_sig": payload["content_sig"],
+                }
+                deliver_env = create_envelope(
+                    "USER_DELIVER",
+                    self.current_server_id,
+                    user_id,
+                    deliver_payload,
+                    signature=self.local_pubkey,
+                )
+                await local_link.send_message(deliver_env)
+                logger.info("Delivered SERVER_DELIVER payload to local user %s", user_id)
+                return
+
+            if isinstance(target_location, str) and is_uuid_v4(target_location):
+                if target_location == origin_server_id:
+                    logger.debug("SERVER_DELIVER already at destination %s; dropping", target_location)
+                    return
+                link = self._resolve_server_link(target_location)
+                if not link:
+                    logger.warning(
+                        "No link to forward SERVER_DELIVER for %s via %s", user_id, target_location
+                    )
+                    return
+                await link.send_message(envelope)
+                logger.info(
+                    "Forwarded SERVER_DELIVER for %s toward server %s", user_id, target_location
+                )
+                return
+
+            logger.warning("Dropping SERVER_DELIVER for unknown user %s", user_id)
+            return
+
+        # TODO: Other server message types will be implemented later
     
     async def broadcast_user_advertise(self, user_id: str, meta: Dict[str, Any]) -> None:
         """Broadcast USER_ADVERTISE to all connected servers"""
@@ -699,9 +963,34 @@ class SOCPServer:
             link = value if isinstance(value, ConnectionLink) else getattr(value, "link", None)
             if link is not None:
                 await link.send_message(envelope)
-        
+
         logger.info(f"Broadcasted SERVER_ANNOUNCE for {server_id}")
-    
+
+
+    def get_status(self) -> Dict[str, Any]:
+        """Expose internal status for health/diagnostics."""
+        server_links: Dict[str, Dict[str, Any]] = {}
+        for server_id, record in self.servers.items():
+            link: Optional[ConnectionLink]
+            if isinstance(record, ConnectionLink):
+                link = record
+            else:
+                link = getattr(record, "link", None)
+            server_links[server_id] = {
+                "connected": link is not None,
+                "last_seen": getattr(link, "last_seen", None) if link else None,
+            }
+
+        return {
+            "server_id": self.current_server_id,
+            "local_users": list(self.local_users.keys()),
+            "known_servers": dict(self.server_addrs),
+            "server_links": server_links,
+            "heartbeat_interval": self.heartbeat_interval,
+            "heartbeat_timeout": self.heartbeat_timeout,
+        }
+
+
     async def send_error(
         self,
         connection: ConnectionLink,
@@ -725,16 +1014,22 @@ class SOCPServer:
         )
         await connection.send_message(envelope)
     
-    async def cleanup_connection(self, connection: ConnectionLink) -> None:
+    async def cleanup_connection(
+        self,
+        connection: ConnectionLink,
+        *,
+        close_code: int = 1000,
+        close_reason: Optional[str] = None,
+    ) -> None:
         """Clean up when connection closes"""
         self.all_connections.discard(connection)
-        
+
         if connection.user_id:
             await self.cleanup_user_connection(connection.user_id)
         elif connection.server_id:
             await self.cleanup_server_connection(connection.server_id)
-        
-        await connection.close()
+
+        await connection.close(code=close_code, reason=close_reason)
     
     async def cleanup_user_connection(self, user_id: str) -> None:
         """Clean up user connection and broadcast USER_REMOVE"""
