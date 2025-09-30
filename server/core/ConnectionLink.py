@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import time
 from typing import Optional
+
 import websockets
 from websockets.server import WebSocketServerProtocol
 
@@ -17,6 +19,7 @@ class ConnectionLink:
         self.identified = False
         self.user_id: Optional[str] = None
         self.server_id: Optional[str] = None
+        self.last_seen: float = time.monotonic()
         
     async def send_message(self, envelope: Envelope) -> None:
         """Send an envelope as JSON over WebSocket No encryption or signing for now"""
@@ -29,10 +32,10 @@ class ConnectionLink:
         except Exception as e:
             logger.error(f"Error sending message: {e}")
     
-    async def close(self) -> None:
+    async def close(self, code: int = 1000, reason: Optional[str] = None) -> None:
         """Close the WebSocket connection"""
         try:
-            await self.websocket.close(code=1000)  # Normal closure
+            await self.websocket.close(code=code, reason=reason)
         except Exception as e:
             logger.error(f"Error closing connection: {e}")
 
