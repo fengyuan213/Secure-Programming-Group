@@ -18,7 +18,7 @@ from shared.log import get_logger
 from .keys import RSAKeypair, load_keypair, save_keypair
 from .state import Presence
 from .pubdir import PubKeyDirectory
-from .crypto import rsa_oaep_encrypt, rsassa_pss_sign
+from .crypto import rsa_oaep_encrypt, rsassa_pss_sign, rsassa_pss_verify, rsa_oaep_decrypt
 from .ws_client import ClientSession
 
 app = typer.Typer(help="SOCP v1.3 Client CLI")
@@ -94,6 +94,102 @@ def run(
             elif env.type == "USER_REMOVE":
                 uid2 = env.payload.get("user_id")
                 presence.remove(uid2)
+            elif env.type == "USER_DELIVER":
+                # DM receive: decrypt + verify content_sig
+                try:
+                    ct = env.payload.get("ciphertext", "")
+                    sender_pub = env.payload.get("sender_pub", "")
+                    sig = env.payload.get("content_sig", "")
+                    if not ct or not sender_pub or not sig:
+                        console.print("[red]Rejected DM: missing required fields[/]")
+                        return
+                    canonical = (ct + env.from_ + env.to + str(env.ts)).encode()
+                    if not rsassa_pss_verify(sender_pub, canonical, sig):
+                        console.print("[red]Rejected DM: invalid content_sig[/]")
+                        return
+                    pt = rsa_oaep_decrypt(kp.private_pem, ct).decode()
+                    console.print(f"[bold cyan]DM[/] from {env.from_[:8]}...: {pt}")
+                except Exception as e:
+                    console.print(f"[red]DM handling error[/]: {e}")
+            elif env.type == "MSG_PUBLIC_CHANNEL":
+                # Public channel receive: verify content_sig
+                try:
+                    ct = env.payload.get("ciphertext", "")
+                    sender_pub = env.payload.get("sender_pub", "")
+                    sig = env.payload.get("content_sig", "")
+                    if not ct or not sender_pub or not sig:
+                        console.print("[red]Rejected public msg: missing fields[/]")
+                        return
+                    canonical = (ct + env.from_ + str(env.ts)).encode()
+                    if not rsassa_pss_verify(sender_pub, canonical, sig):
+                        console.print("[red]Rejected public msg: invalid content_sig[/]")
+                        return
+                    # For now, assume public channel uses placeholder ciphertext
+                    import base64
+                    pad = "=" * ((4 - (len(ct) % 4)) % 4)
+                    pt = base64.urlsafe_b64decode(ct + pad).decode()
+                    console.print(f"[bold yellow]Public[/] from {env.from_[:8]}...: {pt}")
+                except Exception as e:
+                    console.print(f"[red]Public msg handling error[/]: {e}")
+            elif env.type == "FILE_START":
+                # File receive: store manifest
+                try:
+                    file_id = env.payload.get("file_id")
+                    name = env.payload.get("name")
+                    size = env.payload.get("size")
+                    sha256 = env.payload.get("sha256")
+                    if not all([file_id, name, size, sha256]):
+                        console.print("[red]Invalid FILE_START: missing fields[/]")
+                        return
+                    from .state import InboundFile
+                    if not hasattr(presence, '_files'):
+                        presence._files = {}
+                    presence._files[file_id] = InboundFile(file_id, name, int(size), sha256)
+                    console.print(f"[bold green]Receiving file[/] {name} ({size} bytes) from {env.from_[:8]}...")
+                except Exception as e:
+                    console.print(f"[red]FILE_START handling error[/]: {e}")
+            elif env.type == "FILE_CHUNK":
+                # File receive: store chunk
+                try:
+                    file_id = env.payload.get("file_id")
+                    index = env.payload.get("index")
+                    ct = env.payload.get("ciphertext", "")
+                    if not all([file_id, index is not None, ct]):
+                        console.print("[red]Invalid FILE_CHUNK: missing fields[/]")
+                        return
+                    if not hasattr(presence, '_files') or file_id not in presence._files:
+                        console.print("[red]FILE_CHUNK for unknown file[/]")
+                        return
+                    chunk_data = rsa_oaep_decrypt(kp.private_pem, ct)
+                    presence._files[file_id].write(int(index), chunk_data)
+                    console.print(f"[dim]Received chunk {index} for {presence._files[file_id].name}[/]")
+                except Exception as e:
+                    console.print(f"[red]FILE_CHUNK handling error[/]: {e}")
+            elif env.type == "FILE_END":
+                # File receive: reassemble and verify
+                try:
+                    file_id = env.payload.get("file_id")
+                    if not file_id or not hasattr(presence, '_files') or file_id not in presence._files:
+                        console.print("[red]FILE_END for unknown file[/]")
+                        return
+                    f = presence._files[file_id]
+                    # Reassemble
+                    data = b''.join(f.chunks[i] for i in sorted(f.chunks.keys()))
+                    # Verify
+                    import hashlib
+                    if hashlib.sha256(data).hexdigest() != f.sha256:
+                        console.print(f"[red]File {f.name} failed SHA-256 verification[/]")
+                        del presence._files[file_id]
+                        return
+                    # Safe write
+                    from pathlib import Path
+                    safe_name = "".join(c for c in f.name if c.isalnum() or c in ".-_") or "received_file"
+                    out_path = Path.home() / "Downloads" / safe_name
+                    out_path.write_bytes(data)
+                    console.print(f"[bold green]Saved file[/] {f.name} to {out_path}")
+                    del presence._files[file_id]
+                except Exception as e:
+                    console.print(f"[red]FILE_END handling error[/]: {e}")
             elif env.type == "ERROR":
                 console.print(f"[red]ERROR {env.payload.get('code')}[/]: {env.payload.get('detail')}")
             elif env.type == "ACK":
