@@ -4,7 +4,7 @@ import time
 from typing import Optional
 
 import websockets
-from websockets.server import WebSocketServerProtocol
+from websockets import ClientConnection, ServerConnection
 
 from shared.envelope import Envelope
 
@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 class ConnectionLink:
     """Wrapper around WebSocket connection with connection metadata"""
     
-    def __init__(self, websocket: WebSocketServerProtocol, connection_type: Optional[str] = None):
+    def __init__(self, websocket: ServerConnection | ClientConnection, connection_type: Optional[str] = None):
         self.websocket = websocket
         self.connection_type = connection_type  # "user" or "server"
         self.identified = False
@@ -35,7 +35,7 @@ class ConnectionLink:
     async def close(self, code: int = 1000, reason: Optional[str] = None) -> None:
         """Close the WebSocket connection"""
         try:
-            await self.websocket.close(code=code, reason=reason)
+            await self.websocket.close(code=code, reason=reason or "Connection closed by server, unknown reason")
         except Exception as e:
             logger.error(f"Error closing connection: {e}")
 

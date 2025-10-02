@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional, Set, Tuple
 import json
 import time
 
-from .utils import is_uuid_v4, is_base64url, is_ipv4_hostport
+from shared.utils import is_uuid_v4, is_base64url, is_ipv4_hostport
 
 # message types where 'sig' MAY be omitted (first-contact flows)
 _ALLOW_UNSIGNED_TYPES: Set[str] = {

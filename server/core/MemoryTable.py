@@ -22,14 +22,15 @@ class ServerEndpoint:
 @dataclass
 class ServerRecord: 
     id: str
-    link: ConnectionLink
+    link: Optional[ConnectionLink]
     endpoint: ServerEndpoint
+    pubkey: str
 
 @dataclass
 class UserRecord:
     id: str
     link: Optional[ConnectionLink]   # None if remote
-    location: Location                 # "local" or server_id
+    location: Location                 # "local" or server_id  # pyright: ignore[reportInvalidTypeForm]
 
     # Helper for convenience (doesn't store object refs)
     def resolve_server(self, servers: Dict[str, ServerRecord]) -> Optional[ServerRecord]:
