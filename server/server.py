@@ -23,6 +23,7 @@ from server.core.ConnectionLink import ConnectionLink
 from server.core.MessageCache import MessageDeduplicationCache
 from server.core.MessageTypes import MessageType, ConnectionType
 from server.core.MessageHandlers import SERVER_HANDLER_REGISTRY, USER_HANDLER_REGISTRY
+from server.core.PublicChannelManager import PublicChannelManager
 from shared.envelope import Envelope, create_envelope
 from shared.utils import is_uuid_v4
 from shared.log import get_logger
@@ -63,9 +64,8 @@ class SOCPServer:
     @property
     def connected_local_users(self) -> Dict[str, UserRecord]:
         return {k: v for k, v in self.users.items() if v.location == "local" and v.link is not None}
-    
     @property
-    def all_connections(self) -> Set[ConnectionLink]:
+    def all_server_connection_links(self) -> Set[ConnectionLink]:
         """Derive all connections from servers and users"""
         connections = set()
         
@@ -74,13 +74,6 @@ class SOCPServer:
             record.link for record in self.servers.values()
             if record.link is not None
         )
-        
-        # Add user connections
-        connections.update(
-            record.link for record in self.users.values() 
-            if record.link is not None
-        )
-
         
         return connections
 
@@ -107,6 +100,9 @@ class SOCPServer:
         
         # Duplicate suppression per SOCP §10
         self.message_cache = MessageDeduplicationCache(ttl=dedup_ttl)
+        
+        # Public channel manager per SOCP §9.3
+        self.public_channel = PublicChannelManager(self)
 
         # Initialize storage path for pubkey directory
         self.keypair =  self._load_or_create_server_key()
@@ -172,8 +168,7 @@ class SOCPServer:
         # NOT FINISHED SKETON ONLY
         
         connection = ConnectionLink(websocket,self.signer)
-        self.all_connections.add(connection)
-        
+     
         remote_addr = websocket.remote_address
         logger.info(f"New connection from {remote_addr}")
         
@@ -205,24 +200,7 @@ class SOCPServer:
         finally:
             await self.cleanup_connection(connection)
     
-    def _iter_server_links(self):
-        """Yield ConnectionLink objects for all connected remote servers."""
-        for value in self.servers.values():
-            # value may be a ConnectionLink (post-HELLO) or a ServerRecord (bootstrap entry)
-            link = None
-            if isinstance(value, ConnectionLink):
-                link = value
-            else:
-                # Try to access .link on ServerRecord
-                try:
-                    link = value.link  # type: ignore[attr-defined]
-                except Exception:
-                    link = None
-            if link is not None:
-                logger.debug(
-                    "Iter server link -> %s", getattr(link, "server_id", None)
-                )
-                yield link
+
 
     def _resolve_server_link(self, server_id: str) -> Optional[ConnectionLink]:
         """Return the ConnectionLink for the given server_id if connected."""
@@ -443,7 +421,7 @@ class SOCPServer:
             
             # Check for stale connections and send heartbeats
             stale_links: list[ConnectionLink] = []
-            for link in list(self._iter_server_links()):
+            for link in list(self.all_server_connection_links):
                 server_id = getattr(link, "server_id", None)
                 if not server_id or server_id == self.local_server.id:
                     continue
@@ -613,6 +591,49 @@ class SOCPServer:
         self.add_update_user(user_id, connection, "local")
         
         logger.info(f"User {user_id} connected with client {envelope.payload['client']}")
+        
+        # Add user to public channel per SOCP §9.3
+        user_pubkey = envelope.payload.get("enc_pubkey", envelope.payload.get("pubkey"))
+        if user_pubkey:
+            try:
+                member = self.public_channel.add_member(user_id, user_pubkey)
+                
+                # Send channel info to user first
+                channel_info = self.public_channel.get_channel_info()
+                info_env = create_envelope(
+                    MessageType.PUBLIC_CHANNEL_ADD.value,
+                    self.local_server.id,
+                    user_id,
+                    {
+                        "group_id": channel_info["group_id"],
+                        "version": channel_info["version"],
+                        "meta": channel_info["meta"],
+                    },
+                )
+                await connection.send_message(info_env)
+                
+                # Send wrapped channel key to the user
+                key_share_env = create_envelope(
+                    MessageType.PUBLIC_CHANNEL_KEY_SHARE.value,
+                    self.local_server.id,
+                    user_id,
+                    {
+                        "wrapped_public_channel_key": member.wrapped_key,
+                        "creator_pub": self.keypair.public_b64url(),
+                        "content_sig": "",  # Optional for now
+                    },
+                )
+                await connection.send_message(key_share_env)
+                logger.info(f"Sent public channel info and key to user {user_id}")
+                
+                # Broadcast PUBLIC_CHANNEL_ADD to network per SOCP §9.3
+                await self.broadcast_public_channel_add([user_id])
+                
+                # Broadcast PUBLIC_CHANNEL_UPDATED with all wraps per SOCP §9.3
+                await self.broadcast_public_channel_updated()
+                
+            except Exception as e:
+                logger.error(f"Failed to add user {user_id} to public channel: {e}")
         
         # Broadcast USER_ADVERTISE to all servers
         await self.broadcast_user_advertise(user_id, envelope.payload.get("meta", {}))
@@ -835,10 +856,55 @@ class SOCPServer:
         )
         
         # Send to all connected servers
-        for server_link in self._iter_server_links():
+        for server_link in self.all_server_connection_links:
             await server_link.send_message(envelope)
         
         logger.info(f"Broadcasted USER_ADVERTISE for {user_id}")
+    
+    async def broadcast_public_channel_add(self, user_ids: list[str]) -> None:
+        """Broadcast PUBLIC_CHANNEL_ADD to all connected servers per SOCP §9.3"""
+        if not user_ids:
+            return
+        
+        payload = {
+            "add": user_ids,
+            "if_version": self.public_channel.channel.version - 1,  # Version before addition
+        }
+        envelope = create_envelope(
+            MessageType.PUBLIC_CHANNEL_ADD.value,
+            self.local_server.id,
+            "*",
+            payload,
+        )
+        
+        # Send to all connected servers
+        for server_link in self.all_server_connection_links:
+            await server_link.send_message(envelope)
+        
+        logger.info(f"Broadcasted PUBLIC_CHANNEL_ADD for {len(user_ids)} users")
+    
+    async def broadcast_public_channel_updated(self) -> None:
+        """Broadcast PUBLIC_CHANNEL_UPDATED with current version and all wraps per SOCP §9.3"""
+        wraps = self.public_channel.channel.get_wrapped_keys_list()
+        
+        payload = {
+            "version": self.public_channel.channel.version,
+            "wraps": wraps,
+        }
+        envelope = create_envelope(
+            MessageType.PUBLIC_CHANNEL_UPDATED.value,
+            self.local_server.id,
+            "*",
+            payload,
+        )
+        
+        # Send to all connected servers
+        for server_link in self.all_server_connection_links:
+            await server_link.send_message(envelope)
+        
+        logger.info(
+            f"Broadcasted PUBLIC_CHANNEL_UPDATED version={self.public_channel.channel.version} with {len(wraps)} wraps"
+        )
     
     async def broadcast_server_announce(self, server_id: str, server_info: Dict[str, Any]) -> None:
         """Broadcast SERVER_ANNOUNCE to all other servers"""
@@ -888,6 +954,7 @@ class SOCPServer:
             "heartbeat_interval": self.heartbeat_interval,
             "heartbeat_timeout": self.heartbeat_timeout,
             "message_cache": self.message_cache.stats(),
+            "public_channel": self.public_channel.get_channel_state(),
         }
 
 
@@ -932,7 +999,9 @@ class SOCPServer:
         """Clean up user connection and broadcast USER_REMOVE"""
         if user_id in self.users:
             del self.users[user_id]
-
+        
+        # Remove from public channel
+        self.public_channel.remove_member(user_id)
        
         # Broadcast USER_REMOVE
         payload = {"user_id": user_id, "server_id": self.local_server.id}
@@ -943,7 +1012,7 @@ class SOCPServer:
             payload,
         )
         
-        for server_link in self._iter_server_links():
+        for server_link in self.all_server_connection_links:
             await server_link.send_message(envelope)
         
         logger.info(f"Cleaned up user {user_id}")

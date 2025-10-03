@@ -104,7 +104,7 @@ class ServerMessageHandlers:
                 del server.users[user_id]
         
         # Gossip to other connected servers
-        for link in server._iter_server_links():
+        for link in server.all_server_connection_links:
             if link is connection or (link.server_id and link.server_id == origin_server_id):
                 continue
             logger.debug(
@@ -212,6 +212,191 @@ class ServerMessageHandlers:
         
         # Case 3: Unknown user
         logger.warning("Dropping SERVER_DELIVER for unknown user %s", user_id)
+
+
+    @staticmethod
+    async def handle_public_channel_add(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
+        """Handle PUBLIC_CHANNEL_ADD - notification that users joined the channel."""
+        origin_server_id = envelope.from_
+        payload = envelope.payload
+        
+        # Verify signature
+        if not server._verify_server_signature(origin_server_id, envelope):
+            logger.warning("PUBLIC_CHANNEL_ADD failed signature from %s", origin_server_id)
+            return
+        
+        # Extract added users
+        added_users = payload.get("add", [])
+        if_version = payload.get("if_version")
+        
+        if not isinstance(added_users, list):
+            logger.warning("Malformed PUBLIC_CHANNEL_ADD from %s", origin_server_id)
+            return
+        
+        logger.info(
+            "PUBLIC_CHANNEL_ADD from %s: %d users added (if_version=%s)",
+            origin_server_id,
+            len(added_users),
+            if_version,
+        )
+        
+        # Forward to other servers
+        for link in server.all_server_connection_links:
+            if link is connection or (link.server_id and link.server_id == origin_server_id):
+                continue
+            await link.send_message(envelope)
+    
+    @staticmethod
+    async def handle_public_channel_updated(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
+        """Handle PUBLIC_CHANNEL_UPDATED - channel version and key wraps update."""
+        origin_server_id = envelope.from_
+        payload = envelope.payload
+        
+        # Verify signature
+        if not server._verify_server_signature(origin_server_id, envelope):
+            logger.warning("PUBLIC_CHANNEL_UPDATED failed signature from %s", origin_server_id)
+            return
+        
+        # Extract version and wraps
+        version = payload.get("version")
+        wraps = payload.get("wraps", [])
+        
+        if not isinstance(version, int) or not isinstance(wraps, list):
+            logger.warning("Malformed PUBLIC_CHANNEL_UPDATED from %s", origin_server_id)
+            return
+        
+        logger.info(
+            "PUBLIC_CHANNEL_UPDATED from %s: version=%d, %d wraps",
+            origin_server_id,
+            version,
+            len(wraps),
+        )
+        
+        # Distribute wraps to local users
+        for wrap in wraps:
+            if not isinstance(wrap, dict):
+                continue
+            
+            member_id = wrap.get("member_id")
+            wrapped_key = wrap.get("wrapped_key")
+            
+            if not (isinstance(member_id, str) and isinstance(wrapped_key, str)):
+                continue
+            
+            # Check if this member is local
+            user_rec = server.users.get(member_id)
+            if getattr(user_rec, "location", None) == "local":
+                local_link = getattr(user_rec, "link", None)
+                if local_link:
+                    # Send updated wrap to local user
+                    from shared.envelope import create_envelope
+                    update_env = create_envelope(
+                        "PUBLIC_CHANNEL_UPDATED",
+                        server.local_server.id,
+                        member_id,
+                        {
+                            "version": version,
+                            "wrapped_key": wrapped_key,
+                        },
+                    )
+                    await local_link.send_message(update_env)
+                    logger.debug("Sent channel update to local user %s", member_id)
+        
+        # Forward to other servers
+        for link in server.all_server_connection_links:
+            if link is connection or (link.server_id and link.server_id == origin_server_id):
+                continue
+            await link.send_message(envelope)
+    
+    @staticmethod
+    async def handle_public_channel_key_share(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
+        """Handle PUBLIC_CHANNEL_KEY_SHARE - distribute wrapped channel keys to members."""
+        from shared.envelope import create_envelope
+        
+        origin_server_id = envelope.from_
+        payload = envelope.payload
+        
+        # Verify signature
+        if not server._verify_server_signature(origin_server_id, envelope):
+            logger.warning("PUBLIC_CHANNEL_KEY_SHARE failed signature from %s", origin_server_id)
+            return
+        
+        # Extract shares
+        shares = payload.get("shares", [])
+        if not isinstance(shares, list):
+            logger.warning("Malformed PUBLIC_CHANNEL_KEY_SHARE from %s", origin_server_id)
+            return
+        
+        # Distribute shares to local users
+        for share in shares:
+            if not isinstance(share, dict):
+                continue
+            
+            member_id = share.get("member")
+            wrapped_key = share.get("wrapped_public_channel_key")
+            
+            if not (isinstance(member_id, str) and isinstance(wrapped_key, str)):
+                continue
+            
+            # Check if this member is local
+            user_rec = server.users.get(member_id)
+            if getattr(user_rec, "location", None) == "local":
+                local_link = getattr(user_rec, "link", None)
+                if local_link:
+                    # Send key to local user
+                    key_share_env = create_envelope(
+                        "PUBLIC_CHANNEL_KEY_SHARE",
+                        server.local_server.id,
+                        member_id,
+                        {
+                            "wrapped_public_channel_key": wrapped_key,
+                            "creator_pub": payload.get("creator_pub", ""),
+                            "content_sig": payload.get("content_sig", ""),
+                        },
+                    )
+                    await local_link.send_message(key_share_env)
+                    logger.debug("Sent channel key share to local user %s", member_id)
+        
+        # Forward to other servers for their local users
+        for link in server.all_server_connection_links:
+            if link is connection or (link.server_id and link.server_id == origin_server_id):
+                continue
+            await link.send_message(envelope)
+    
+    @staticmethod
+    async def handle_msg_public_channel_server(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
+        """Handle MSG_PUBLIC_CHANNEL from another server - deliver to local members."""
+        from shared.envelope import create_envelope
+        
+        sender_id = envelope.from_
+        payload = envelope.payload
+        
+        # Validate payload
+        required_fields = {"ciphertext", "iv", "tag", "sender_pub", "content_sig"}
+        if not required_fields.issubset(payload.keys()):
+            logger.warning("Malformed MSG_PUBLIC_CHANNEL from %s", sender_id)
+            return
+        
+        # Get local channel members
+        if not hasattr(server, 'public_channel'):
+            return
+        
+        members = server.public_channel.get_members()
+        
+        # Deliver to local members only
+        for member_id in members:
+            user_rec = server.users.get(member_id)
+            if getattr(user_rec, "location", None) == "local":
+                local_link = getattr(user_rec, "link", None)
+                if local_link:
+                    deliver_env = create_envelope(
+                        MessageType.MSG_PUBLIC_CHANNEL.value,
+                        sender_id,
+                        "public",
+                        payload,
+                    )
+                    await local_link.send_message(deliver_env)
+                    logger.debug("Delivered public channel message from %s to local user %s", sender_id, member_id)
 
 
 class UserMessageHandlers:
@@ -332,6 +517,86 @@ class UserMessageHandlers:
             f"No route to {recipient_id}",
             to_id=sender_id,
         )
+    
+    @staticmethod
+    async def handle_msg_public_channel(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
+        """Handle MSG_PUBLIC_CHANNEL - broadcast message to all channel members."""
+        from shared.envelope import create_envelope
+        
+        sender_id = connection.user_id
+        if sender_id is None or sender_id != envelope.from_:
+            await server.send_error(
+                connection,
+                "BAD_SENDER",
+                "Envelope sender mismatch",
+                to_id=envelope.from_,
+            )
+            return
+        
+        # Validate payload
+        payload = envelope.payload
+        required_fields = {"ciphertext", "iv", "tag", "sender_pub", "content_sig"}
+        if not required_fields.issubset(payload.keys()):
+            missing = required_fields - set(payload.keys())
+            await server.send_error(
+                connection,
+                "BAD_PAYLOAD",
+                f"Missing fields: {sorted(missing)}",
+                to_id=sender_id,
+            )
+            return
+        
+        # Check if user is a member of public channel
+        if not hasattr(server, 'public_channel') or sender_id not in server.public_channel.get_members():
+            await server.send_error(
+                connection,
+                "UNAUTHORIZED",
+                "Not a member of public channel",
+                to_id=sender_id,
+            )
+            return
+        
+        # Prepare broadcast payload
+        broadcast_payload = {
+            "ciphertext": payload["ciphertext"],
+            "iv": payload["iv"],
+            "tag": payload["tag"],
+            "sender_pub": payload["sender_pub"],
+            "content_sig": payload["content_sig"],
+        }
+        
+        # Get all channel members
+        members = server.public_channel.get_members()
+        
+        # Deliver to local members
+        for member_id in members:
+            if member_id == sender_id:
+                continue  # Don't echo back to sender
+            
+            user_rec = server.users.get(member_id)
+            if getattr(user_rec, "location", None) == "local":
+                local_link = getattr(user_rec, "link", None)
+                if local_link:
+                    deliver_env = create_envelope(
+                        MessageType.MSG_PUBLIC_CHANNEL.value,
+                        sender_id,
+                        "public",
+                        broadcast_payload,
+                    )
+                    await local_link.send_message(deliver_env)
+        
+        # Broadcast to all other servers for their local members
+        server_env = create_envelope(
+            MessageType.MSG_PUBLIC_CHANNEL.value,
+            sender_id,
+            "public",
+            broadcast_payload,
+        )
+        server
+        for link in server.all_server_connection_links:
+            await link.send_message(server_env)
+        
+        logger.info("Broadcasted public channel message from %s to %d members", sender_id, len(members))
 
 
 # Handler registry mapping message types to their handlers
@@ -341,9 +606,14 @@ SERVER_HANDLER_REGISTRY: Dict[MessageType, MessageHandler] = {
     MessageType.USER_ADVERTISE: ServerMessageHandlers.handle_presence_gossip,
     MessageType.USER_REMOVE: ServerMessageHandlers.handle_presence_gossip,
     MessageType.SERVER_DELIVER: ServerMessageHandlers.handle_server_deliver,
+    MessageType.PUBLIC_CHANNEL_ADD: ServerMessageHandlers.handle_public_channel_add,
+    MessageType.PUBLIC_CHANNEL_UPDATED: ServerMessageHandlers.handle_public_channel_updated,
+    MessageType.PUBLIC_CHANNEL_KEY_SHARE: ServerMessageHandlers.handle_public_channel_key_share,
+    MessageType.MSG_PUBLIC_CHANNEL: ServerMessageHandlers.handle_msg_public_channel_server,
 }
 
 USER_HANDLER_REGISTRY: Dict[MessageType, MessageHandler] = {
     MessageType.MSG_DIRECT: UserMessageHandlers.handle_msg_direct,
+    MessageType.MSG_PUBLIC_CHANNEL: UserMessageHandlers.handle_msg_public_channel,
 }
 
