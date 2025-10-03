@@ -22,8 +22,9 @@ class ServerEndpoint:
 @dataclass
 class ServerRecord: 
     id: str
-    link: ConnectionLink
+    link: ConnectionLink | None
     endpoint: ServerEndpoint
+    pubkey: str
 
 @dataclass
 class UserRecord:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
+from mimetypes import init
 import os
 import json
 import tempfile
@@ -13,8 +14,10 @@ import time
 import uuid
 from typing import Dict, NamedTuple, Optional, Set, Tuple, Any
 from server.core.MemoryTable import *
+from shared.crypto.keys import RSAKeypair, load_keypair, save_keypair
+
+from shared.crypto.signer import RSAServerTransportSigner
 import websockets
-from websockets.server import WebSocketServerProtocol
 
 from server.core.ConnectionLink import ConnectionLink
 from shared.envelope import Envelope, create_envelope
@@ -23,59 +26,94 @@ from shared.log import get_logger
 
 # Confiure Logging
 logger = get_logger(__name__)
+
 class SOCPServer:
-    current_server_id: str
-    servers: Dict[str, ServerRecord] 
-    users: Dict[str, UserRecord] 
-    
-    
-    def add_server(self, server_id: str, endpoint: ServerEndpoint, link: Optional[ConnectionLink]):
 
-        record = ServerRecord(id=server_id, link=link, endpoint=endpoint)  # type: ignore[arg-type]
-        self.servers[server_id] = record
-        self.current_server_id = server_id
-        self.server_addrs[server_id] = (endpoint.host, endpoint.port)
+    def add_update_server(
+        self,
+        server_id: str,
+        endpoint: Optional[ServerEndpoint] = None,
+        link: Optional[ConnectionLink] = None,
+        pubkey: Optional[str] = None,
+    ) -> None:
+        existing = self.servers.get(server_id)
+        if existing:
+            if endpoint is not None:
+                existing.endpoint = endpoint
+            if link is not None:
+                existing.link = link
+            if pubkey is not None:
+                existing.pubkey = pubkey
+            return
 
-        # Track pinned pubkey for gossip/bootstrap lists. Production builds will
-        # load the real key from disk; tests rely on this placeholder.
-        if server_id not in self.server_pubkeys:
-            self.server_pubkeys[server_id] = self.local_pubkey
-
-    def add_local_user(self, user_id: str, link: ConnectionLink):
-        record = UserRecord(id=user_id, link=link, location="local")
+        # creating new record: require mandatory fields
+        if endpoint is None or pubkey is None:
+            raise ValueError("endpoint and pubkey required for new server")
+        self.servers[server_id] = ServerRecord(id=server_id, link=link, endpoint=endpoint, pubkey=pubkey)
+    def add_update_user(self, user_id: str, link: ConnectionLink | None, location: str):
+        record = UserRecord(id=user_id, link=link, location=location)
         self.users[user_id] = record
+    @property    
+    def connected_users(self) -> Dict[str, UserRecord]:
+        return {k: v for k, v in self.users.items() if v.link is not None}
+    
+    @property
+    def connected_local_users(self) -> Dict[str, UserRecord]:
+        return {k: v for k, v in self.users.items() if v.location == "local" and v.link is not None}
+    
+    @property
+    def all_connections(self) -> Set[ConnectionLink]:
+        """Derive all connections from servers and users"""
+        connections = set()
+        
+        # Add server connections
+        connections.update(
+            record.link for record in self.servers.values()
+            if record.link is not None
+        )
+        
+        # Add user connections
+        connections.update(
+            record.link for record in self.users.values() 
+            if record.link is not None
+        )
+
+        
+        return connections
+
         
     def __init__(
         self,
+        storage_path: Path,
         host: str = "localhost",
         port: int = 8765,
         *,
         heartbeat_interval: float = 15.0,
         heartbeat_timeout: float = 45.0,
     ):
+        
+        # These two are single source of truth for all servers and users on the network.
         self.servers: Dict[str, ServerRecord] = {} # Map of remote server_id → record for that server. Used to track connected servers and their links.
         self.users: Dict[str, UserRecord] = {} # Map of local user_id → record. High-level registry of users known to this server (locals primarily).
-
-        # initialise required in-memory tables
-        self.local_users: Dict[str, ConnectionLink] = {} # Map of local user_id → ConnectionLink. Active WebSocket connections for locally attached users; used to deliver frames to local clients.
-        self.user_locations: Dict[str, str] = {} # Map of user_id → "local" or hosting server_id. Network directory used for routing (decides local deliver vs forward to a remote server).
-        self.server_addrs: Dict[str, Tuple[str, int]] = {} # Map of server_id → (host, port). Known advertised addresses for servers; used for reconnects and bootstrap
-        self.server_pubkeys: Dict[str, str] = {} # Map of server_id → pinned pubkey as advertised in welcome/broadcast frames.
-        self.all_connections: Set[ConnectionLink] = set() #  Set of all ConnectionLink objects (both users and servers). Useful for lifecycle management and cleanup.
+        self.storage_path = storage_path
         self._background_tasks: Set[asyncio.Task] = set()
 
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
 
-
-        # load or create persistent server UUID and register ourselves
-        self.local_pubkey = "AA"
-        persisted_id = self._load_or_create_server_id()
-        self.add_server(persisted_id, ServerEndpoint(host=host, port=port), None)
+        # Initialize storage path for pubkey directory
+        self.keypair =  self._load_or_create_server_key()
+        self.signer = RSAServerTransportSigner(self.keypair)
         
-        self.host = host
-        self.port = port
-        logger.info(f"Initialized SOCP Server with ID: {self.current_server_id}")
+        
+        # load or create persistent server UUID and register ourselves
+  
+        persisted_id = self._load_or_create_server_id()
+        self.add_update_server(persisted_id, ServerEndpoint(host=host, port=port), None, self.keypair.public_b64url())
+        
+        self.local_server = ServerRecord(id=persisted_id, link=None, endpoint=ServerEndpoint(host=host, port=port), pubkey=self.keypair.public_b64url())
+        
+        logger.info(f"Initialized SOCP Server with ID: {self.local_server.id}")
 
     def _track_background_task(self, task: asyncio.Task) -> None:
         """Keep a strong reference to background tasks until completion."""
@@ -88,16 +126,16 @@ class SOCPServer:
 
     async def start_server(self) -> None:
         """Start the WebSocket server"""
-        logger.info(f"Starting SOCP server on {self.host}:{self.port}")
+        logger.info(f"Starting SOCP server on {self.local_server.endpoint.host}:{self.local_server.endpoint.port}")
         
         async with websockets.serve(
             self.handle_connection,
-            self.host,
-            self.port,
+            self.local_server.endpoint.host,
+            self.local_server.endpoint.port,
             ping_interval=15,  # Send ping every 15s (heartbeat support)
             ping_timeout=45,   # Timeout after 45s without pong
         ):
-            logger.info(f"SOCP server listening on ws://{self.host}:{self.port}")
+            logger.info(f"SOCP server listening on ws://{self.local_server.endpoint.host}:{self.local_server.endpoint.port}")
             # Kick off bootstrap and outbound connection maintenance in background
             for coroutine in (self.bootstrap(), self._connect_loop(), self._health_loop()):
                 task = asyncio.create_task(coroutine)
@@ -111,11 +149,11 @@ class SOCPServer:
             finally:
                 for task in list(self._background_tasks):
                     task.cancel()
-
+                    
                     with suppress(asyncio.CancelledError):
                         await task
     
-    async def handle_connection(self, websocket: WebSocketServerProtocol, path: str) -> None:
+    async def handle_connection(self, websocket: websockets.ServerConnection) -> None:
         """
         Handle new WebSocket connection
         
@@ -125,9 +163,9 @@ class SOCPServer:
         - For users: USER_HELLO (Section 9.1)
         """
         # NOT FINISHED SKETON ONLY
-        connection = ConnectionLink(websocket)
+        
+        connection = ConnectionLink(websocket,self.signer)
         self.all_connections.add(connection)
-        connection.last_seen = time.monotonic()
         
         remote_addr = websocket.remote_address
         logger.info(f"New connection from {remote_addr}")
@@ -140,6 +178,8 @@ class SOCPServer:
             async for message in websocket:
                 try:
                     connection.last_seen = time.monotonic()
+                    if isinstance(message, bytes):
+                        message = message.decode("utf-8")
                     await self.process_message(connection, message)
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
@@ -186,34 +226,40 @@ class SOCPServer:
 
 
     def _verify_server_signature(self, server_id: str, envelope: Envelope) -> bool:
-        """Best-effort signature check using pinned pubkeys from bootstrap/HELLO flows."""
+        """Verify RSASSA-PSS over canonicalized payload using the sender's pinned pubkey.
+
+        The canonical form is JSON.dumps(payload, separators=(",", ":"), sort_keys=True).
+        Pubkeys are pinned from bootstrap.yaml, SERVER_WELCOME.servers[*].pubkey, and
+        SERVER_ANNOUNCE frames.
+        """
         if not is_uuid_v4(server_id):
             return False
-        # Local server messages are trusted (we generated them)
-        if server_id == self.current_server_id:
-            return True
-        expected_sig = self.server_pubkeys.get(server_id)
-        if not expected_sig:
-            logger.warning("No pubkey on record for server %s", server_id)
+        
+        record = self.servers.get(server_id)
+        pubkey_b64url = getattr(record, "pubkey", "") if record is not None else ""
+        if not pubkey_b64url:
+            logger.warning("No pinned pubkey for server %s; cannot verify signature", server_id)
             return False
-        if envelope.sig != expected_sig:
-            logger.warning(
-                "Signature mismatch for %s: expected %s got %s",
-                server_id,
-                expected_sig,
-                envelope.sig,
-            )
-            return False
-        return True
 
-    def _state_path(self) -> str:
-        """Return path to server state file (JSON)."""
-        # Place next to this module: server/state.json
-        return os.path.join(os.path.dirname(__file__), "state.json")
+        if envelope.sig is None:
+            logger.warning("Missing signature on message %s from %s", envelope.type, server_id)
+            return False
+
+        try:
+            ok = self.signer.verify(envelope.payload, envelope.sig)
+            if not ok:
+                logger.warning("Transport signature verification failed for %s from %s", envelope.type, server_id)
+            return ok
+        except Exception as exc:
+            logger.error("Failed to canonicalize payload for signature verification: %s", exc)
+            return False
+
+      
+
 
     def _load_or_create_server_id(self) -> str:
         """Load persisted server_id if valid; otherwise create, persist, and return a new UUIDv4."""
-        path = self._state_path()
+        path = self.storage_path / "server_id.json"
         try:
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
@@ -233,7 +279,7 @@ class SOCPServer:
         """Write server_id to state.json atomically to avoid corruption.
             
             WARNING: this causes multiple servers to reuse the same server ID if you run them from the same repository."""
-        path = self._state_path()
+        path = self.storage_path / "server_id.json"
         os.makedirs(os.path.dirname(path), exist_ok=True)
         payload = {"server_id": server_id}
         # Write to a temp file then replace
@@ -252,7 +298,22 @@ class SOCPServer:
                     os.remove(tmp_path)
                 except OSError:
                     pass
-
+    def _load_or_create_server_key(self) -> RSAKeypair:
+        """Load existing RSA keys or generate new ones"""
+        def generate_new_key(key_path: Path):
+            keypair = RSAKeypair.generate()
+            save_keypair(key_path, keypair)
+            return keypair
+        
+        key_path =self.storage_path / "server_keys/pem"
+        if os.path.exists(key_path):
+            keypair = load_keypair(key_path)
+            if not keypair:
+                keypair = generate_new_key(key_path)
+            return keypair
+        return generate_new_key(key_path)
+        
+       
     def _bootstrap_path(self) -> Path:
         """Return path to bootstrap YAML file if present."""
         return Path(os.path.dirname(__file__)) / "bootstrap.yaml"
@@ -271,7 +332,7 @@ class SOCPServer:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
-            entries = data.get("bootstrap_servers") or data or []
+            entries = data.get("bootstrap_servers", []) if isinstance(data, dict) else []
             # Normalize to list of dicts
             if isinstance(entries, dict):
                 entries = [entries]
@@ -290,6 +351,7 @@ class SOCPServer:
     async def bootstrap(self) -> None:
         """Attempt to join via introducers and populate server_addrs; broadcast announcement."""
         introducers = self._load_bootstrap_list()
+        
         if not introducers:
             return
         if len(introducers) < 3:
@@ -298,38 +360,40 @@ class SOCPServer:
         for entry in introducers:
             host = entry["host"]; port = entry["port"]
             # Skip self to avoid self-bootstrapping loops
-            if (host == self.host or host in {"127.0.0.1", "localhost"} and self.host in {"127.0.0.1", "localhost"}) and port == self.port:
+            if (host == self.local_server.endpoint.host or host in {"127.0.0.1", "localhost"} and self.local_server.endpoint.host in {"127.0.0.1", "localhost"}) and port == self.local_server.endpoint.port:
                 logger.info("Skipping bootstrap entry pointing to self")
                 continue
             url = f"ws://{host}:{port}"
             try:
                 async with websockets.connect(url) as ws:
-                    link = ConnectionLink(ws, connection_type="server")
+                    link = ConnectionLink(ws,self.signer, connection_type="server")
                     # Send SERVER_HELLO_JOIN to introducer (to=host:port per spec)
                     join_env = create_envelope(
                         "SERVER_HELLO_JOIN",
-                        self.current_server_id,
+                        self.local_server.id,
                         f"{host}:{port}",
-                        {"host": self.host, "port": self.port, "pubkey": self.local_pubkey},
-                        signature=self.local_pubkey,
+                        {"host": self.local_server.endpoint.host, "port": self.local_server.endpoint.port, "pubkey": self.local_server.pubkey},
                     )
                     await link.send_message(join_env)
                     # Expect a SERVER_WELCOME (optional wait)
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                        if isinstance(raw, bytes):
+                            raw = raw.decode("utf-8")
                         welcome = Envelope.from_json(raw)
                         if welcome.type == "SERVER_WELCOME":
                             assigned = welcome.payload.get("assigned_id")
                             if isinstance(assigned, str) and is_uuid_v4(assigned):
-                                if assigned != self.current_server_id:
-                                    self.current_server_id = assigned
+                                if assigned != self.local_server.id:
+                                    self.local_server.id = assigned
                                     self._persist_server_id_atomic(assigned)
                             # introducer identity from frame
                             introducer_id = welcome.from_
                             if is_uuid_v4(introducer_id):
-                                self.server_addrs[introducer_id] = (host, port)
-                                if entry.get("pubkey"):
-                                    self.server_pubkeys[introducer_id] = entry.get("pubkey", "")
+                                self.add_update_server(introducer_id, ServerEndpoint(host=host, port=port), link, entry.get("pubkey", ""))
+                                 #self.server_addrs[introducer_id] = (host, port)
+                                #if entry.get("pubkey"):
+                                #    self.server_pubkeys[introducer_id] = entry.get("pubkey", "")
                             # Populate server_addrs from payload (accept key 'servers')
                             peers = welcome.payload.get("servers") or []
                             for p in peers:
@@ -338,14 +402,15 @@ class SOCPServer:
                                 sid = p.get("server_id")
                                 h = p.get("host"); prt = p.get("port")
                                 if isinstance(sid, str) and isinstance(h, str) and isinstance(prt, int):
-                                    if sid != self.current_server_id:
-                                        self.server_addrs[sid] = (h, prt)
-                                        if "pubkey" in p and isinstance(p.get("pubkey"), str):
-                                            self.server_pubkeys[sid] = p.get("pubkey", "")
+                                    if sid != self.local_server.id:
+                                        self.add_update_server(sid, ServerEndpoint(host=h, port=prt), None, p.get("pubkey", ""))
+                                        #self.server_addrs[sid] = (h, prt)
+                                        #if "pubkey" in p and isinstance(p.get("pubkey"), str):
+                                        #    self.server_pubkeys[sid] = p.get("pubkey", "")
                     except asyncio.TimeoutError:
                         pass
                     # Announce ourselves network-wide
-                    await self.broadcast_server_announce(self.current_server_id, {"host": self.host, "port": self.port, "pubkey": self.local_pubkey})
+                    await self.broadcast_server_announce(self.local_server.id, {"host": self.local_server.endpoint.host, "port": self.local_server.endpoint.port, "pubkey": self.local_server.pubkey})
                     break  # stop after first successful introducer
             except Exception as e:
                 logger.warning(f"Bootstrap to {url} failed: {e}")
@@ -368,7 +433,7 @@ class SOCPServer:
             stale_links: list[ConnectionLink] = []
             for link in list(self._iter_server_links()):
                 server_id = getattr(link, "server_id", None)
-                if not server_id or server_id == self.current_server_id:
+                if not server_id or server_id == self.local_server.id:
                     continue
                 last_seen = getattr(link, "last_seen", now)
                 if now - last_seen >= self.heartbeat_timeout:
@@ -376,10 +441,9 @@ class SOCPServer:
                     continue
                 heartbeat = create_envelope(
                     "HEARTBEAT",
-                    self.current_server_id,
+                    self.local_server.id,
                     server_id,
                     {},
-                    signature=self.local_pubkey,
                 )
                 await link.send_message(heartbeat)
             for link in stale_links:
@@ -396,8 +460,10 @@ class SOCPServer:
 
     async def connect_to_known_servers(self) -> None:
         """Attempt outbound connections to all entries in server_addrs that aren't connected."""
-        for server_id, (h, p) in list(self.server_addrs.items()):
-            if server_id == self.current_server_id:
+        for server_id, server in list(self.servers.items()):
+            h = server.endpoint.host
+            p = server.endpoint.port
+            if server_id == self.local_server.id:
                 continue
             # If already connected (link present), skip
             existing = self.servers.get(server_id)
@@ -408,37 +474,35 @@ class SOCPServer:
                 url = f"ws://{h}:{p}"
                 logger.info(f"Connecting to server {server_id} at {h}:{p}")
                 ws = await websockets.connect(url)
-                link = ConnectionLink(ws, connection_type="server")
+                link = ConnectionLink(ws,self.signer, connection_type="server")
                 link.server_id = server_id
                 link.identified = True
-                self.all_connections.add(link)
+              
                 link.last_seen = time.monotonic()
 
                 # Identify ourselves with SERVER_HELLO_LINK (to = remote server_id)
                 link_env = create_envelope(
                     "SERVER_HELLO_LINK",
-                    self.current_server_id,
+                    self.local_server.id,
                     server_id,
-                    {"host": self.host, "port": self.port, "pubkey": "AA"},
-                    signature="AA",
+                    {"host": self.local_server.endpoint.host, "port": self.local_server.endpoint.port, "pubkey": self.local_server.pubkey},
                 )
                 await link.send_message(link_env)
                 # Optional: await welcome
                 with suppress(asyncio.TimeoutError):
                     initial = await asyncio.wait_for(ws.recv(), timeout=1.0)
                     link.last_seen = time.monotonic()
-
+                    if isinstance(initial, bytes):
+                        initial = initial.decode("utf-8")
                     await self.process_message(link, initial)
                 # Register link
                 link.connection_type = "server"
-                self.servers[server_id] = link
+                self.add_update_server(server_id, ServerEndpoint(host=h, port=p), link, server.pubkey)
                 reader = asyncio.create_task(self._run_server_link(link))
                 self._track_background_task(reader)
                 logger.info(f"Connected and linked to server {server_id} at {h}:{p}")
             except Exception as e:
                 logger.debug(f"Connect to {server_id}@{h}:{p} failed: {e}")
-                if link and link in self.all_connections:
-                    self.all_connections.discard(link)
                 if link is not None:
                     with suppress(Exception):
                         await link.close()
@@ -450,6 +514,8 @@ class SOCPServer:
                 message = await link.websocket.recv()
                 link.last_seen = time.monotonic()
 
+                if isinstance(message, bytes):
+                    message = message.decode("utf-8")
                 await self.process_message(link, message)
         except websockets.exceptions.ConnectionClosed:
             logger.info("Server link %s closed", getattr(link, "server_id", None))
@@ -472,6 +538,8 @@ class SOCPServer:
                 connection.websocket.recv(),
                 timeout=30.0  # 30 second timeout for first message
             )
+            if isinstance(first_message, bytes):
+                first_message = first_message.decode("utf-8")
             connection.last_seen = time.monotonic()
 
             # Parse the message
@@ -512,7 +580,7 @@ class SOCPServer:
             return
         
         # Validate user_id is not already in use locally
-        if user_id in self.local_users:
+        if user_id in self.connected_users:
             logger.warning(f"User ID {user_id} already in use")
             await self.send_error(connection, "NAME_IN_USE", f"User {user_id} already connected", to_id=user_id)
             return
@@ -529,10 +597,8 @@ class SOCPServer:
         connection.user_id = user_id
         connection.identified = True
         
-        self.local_users[user_id] = connection
-        self.user_locations[user_id] = "local"
         # Maintain unified user table for presence tracking
-        self.add_local_user(user_id, connection)
+        self.add_update_user(user_id, connection, "local")
         
         logger.info(f"User {user_id} connected with client {envelope.payload['client']}")
         
@@ -552,7 +618,7 @@ class SOCPServer:
         requested_server_id = envelope.from_
 
         # Ignore self-join attempts
-        if requested_server_id == self.current_server_id:
+        if requested_server_id == self.local_server.id:
             logger.warning("Ignoring SERVER_HELLO_JOIN from self")
             return
 
@@ -565,20 +631,17 @@ class SOCPServer:
 
         # Assign server ID ensuring uniqueness as per spec
         assigned_server_id = requested_server_id if is_uuid_v4(requested_server_id) else str(uuid.uuid4())
-        if assigned_server_id in self.server_addrs or assigned_server_id == self.current_server_id:
+        if assigned_server_id in self.servers or assigned_server_id == self.local_server.id:
             logger.info(f"Reassigning duplicate server_id {requested_server_id}")
             assigned_server_id = str(uuid.uuid4())
-            while assigned_server_id in self.server_addrs or assigned_server_id == self.current_server_id:
+            while assigned_server_id in self.servers or assigned_server_id == self.local_server.id:
                 assigned_server_id = str(uuid.uuid4())
 
         # Register the server
         connection.connection_type = "server"
         connection.server_id = assigned_server_id
         connection.identified = True
-
-        self.servers[assigned_server_id] = connection
-        self.server_addrs[assigned_server_id] = (envelope.payload["host"], envelope.payload["port"])
-        self.server_pubkeys[assigned_server_id] = envelope.payload.get("pubkey", "")
+        self.add_update_server(assigned_server_id, ServerEndpoint(host=envelope.payload["host"], port=envelope.payload["port"]), connection, envelope.payload.get("pubkey", ""))
 
         logger.info(f"Server {assigned_server_id} joined from {envelope.payload['host']}:{envelope.payload['port']}")
 
@@ -588,17 +651,18 @@ class SOCPServer:
             "servers": [
                 {
                     "server_id": sid,
-                    "host": addr[0],
-                    "port": addr[1],
-                    "pubkey": self.server_pubkeys.get(sid, ""),
+                    "host": server.endpoint.host,
+                    "port": server.endpoint.port,
+                    "pubkey": self.servers[sid].pubkey,
                 }
-                for sid, addr in self.server_addrs.items()
+                for sid, server in self.servers.items()
                 if sid != assigned_server_id
             ],
+            
         }
         welcome_envelope = create_envelope(
             "SERVER_WELCOME",
-            self.current_server_id,
+            self.local_server.id,
             assigned_server_id,
             welcome_payload
         )
@@ -620,9 +684,11 @@ class SOCPServer:
         connection.connection_type = "server"
         connection.server_id = server_id
         connection.identified = True
-        self.servers[server_id] = connection
-        self.server_addrs[server_id] = (envelope.payload["host"], envelope.payload["port"])
-        self.server_pubkeys[server_id] = envelope.payload.get("pubkey", "")
+        
+        self.add_update_server(server_id, ServerEndpoint(host=envelope.payload["host"], port=envelope.payload["port"]), connection, envelope.payload.get("pubkey", ""))
+        #self.servers[server_id] = connection
+        #self.server_addrs[server_id] = (envelope.payload["host"], envelope.payload["port"])
+        #self.server_pubkeys[server_id] = envelope.payload.get("pubkey", "")
         logger.info(f"Linked server {server_id} at {envelope.payload['host']}:{envelope.payload['port']}")
     
     async def process_message(self, connection: ConnectionLink, message: str) -> None:
@@ -709,11 +775,12 @@ class SOCPServer:
             "sender_pub": payload["sender_pub"],
             "content_sig": payload["content_sig"],
         }
-
+        # TODO: Remove local_users and user_locations and use servers and users instead
         # Prefer authoritative routing table, fall back to live local link check.
-        location = self.user_locations.get(recipient_id)
-        if location == "local" or recipient_id in self.local_users:
-            local_link = self.local_users.get(recipient_id)
+        rec = self.users.get(recipient_id)
+        location = getattr(rec, "location", None)
+        if location == "local" or recipient_id in self.users:
+            local_link = getattr(rec, "link", None)
             if not local_link:
                 await self.send_error(
                     connection,
@@ -724,10 +791,9 @@ class SOCPServer:
                 return
             deliver_env = create_envelope(
                 "USER_DELIVER",
-                self.current_server_id,
+                self.local_server.id,
                 recipient_id,
                 base_payload,
-                signature=self.local_pubkey,
             )
             await local_link.send_message(deliver_env)
             logger.info("Delivered direct message from %s to local user %s", sender_id, recipient_id)
@@ -747,10 +813,9 @@ class SOCPServer:
             server_payload = {"user_id": recipient_id, **base_payload}
             server_env = create_envelope(
                 "SERVER_DELIVER",
-                self.current_server_id,
+                self.local_server.id,
                 location,
                 server_payload,
-                signature=self.local_pubkey,
             )
             await server_link.send_message(server_env)
             logger.info(
@@ -786,6 +851,28 @@ class SOCPServer:
             return
 
 
+        if msg_type == "SERVER_ANNOUNCE":
+            # May be unsigned per spec; use it to pin/update address and pubkey for the sender
+            payload = envelope.payload
+            host = payload.get("host")
+            port = payload.get("port")
+            pubkey = payload.get("pubkey", "")
+            if not (isinstance(host, str) and isinstance(port, int)):
+                await self.send_error(
+                    connection,
+                    "BAD_PAYLOAD",
+                    "Malformed SERVER_ANNOUNCE payload",
+                    to_id=envelope.from_,
+                )
+                return
+            # Preserve existing link if any, update endpoint and pubkey
+            existing = self.servers.get(origin_server_id)
+            link = existing if isinstance(existing, ConnectionLink) else getattr(existing, "link", None)
+            self.add_update_server(origin_server_id, ServerEndpoint(host=host, port=port), link, pubkey)
+            logger.info("Updated server %s from SERVER_ANNOUNCE to %s:%s", origin_server_id, host, port)
+            return
+
+
         # PRESENCE GOSSIP: maintain user_locations
         if msg_type in {"USER_ADVERTISE", "USER_REMOVE"}:
             payload = envelope.payload
@@ -817,13 +904,15 @@ class SOCPServer:
 
             if msg_type == "USER_ADVERTISE":
                 # Advertise: map the user to the announced hosting server
-                self.user_locations[user_id] = server_id
-                self.users[user_id] = UserRecord(id=user_id, link=None, location=server_id)
+                #self.user_locations[user_id] = server_id
+                #self.users[user_id] = UserRecord(id=user_id, link=None, location=server_id)
+                self.add_update_user(user_id, None, server_id)
             else:
                 # USER_REMOVE: only delete if mapping still matches the sender's claim
-                if self.user_locations.get(user_id) == server_id:
-                    del self.user_locations[user_id]
-                if user_id in self.users and self.users[user_id].location == server_id:
+                rec = self.users.get(user_id)
+                if getattr(rec, "location", None) == server_id:
+                    del self.users[user_id]
+                if user_id in self.users and getattr(self.users[user_id], "location", None) == server_id:
                     del self.users[user_id]
 
             # Gossip to other connected servers unchanged
@@ -857,9 +946,10 @@ class SOCPServer:
                 )
                 return
 
-            target_location = self.user_locations.get(user_id)
-            if target_location == "local" or user_id in self.local_users:
-                local_link = self.local_users.get(user_id)
+            rec = self.users.get(user_id)
+            target_location = getattr(rec, "location", None)
+            if target_location == "local" or user_id in self.users:
+                local_link = getattr(rec, "link", None)
                 if not local_link:
                     logger.warning("SERVER_DELIVER for %s but user not connected", user_id)
                     return
@@ -891,10 +981,9 @@ class SOCPServer:
                 }
                 deliver_env = create_envelope(
                     "USER_DELIVER",
-                    self.current_server_id,
+                    self.local_server.id,
                     user_id,
                     deliver_payload,
-                    signature=self.local_pubkey,
                 )
                 await local_link.send_message(deliver_env)
                 logger.info("Delivered SERVER_DELIVER payload to local user %s", user_id)
@@ -925,15 +1014,14 @@ class SOCPServer:
         """Broadcast USER_ADVERTISE to all connected servers"""
         payload = {
             "user_id": user_id,
-            "server_id": self.current_server_id,
+            "server_id": self.local_server.id,
             "meta": meta
         }
         envelope = create_envelope(
             "USER_ADVERTISE",
-            self.current_server_id,
+            self.local_server.id,
             "*",
             payload,
-            signature=self.local_pubkey,
         )
         
         # Send to all connected servers
@@ -949,9 +1037,9 @@ class SOCPServer:
             "port": server_info["port"],
             "pubkey": server_info["pubkey"]
         }
-
-        self.server_addrs[server_id] = (server_info["host"], server_info["port"])
-        self.server_pubkeys[server_id] = server_info.get("pubkey", "")
+        # TODO: Check for compliance with SOCP spec may not be needed as upstream already handle this
+        #self.server_addrs[server_id] = (server_info["host"], server_info["port"])
+        #self.server_pubkeys[server_id] = server_info.get("pubkey", "")
 
         envelope = create_envelope("SERVER_ANNOUNCE", server_id, "*", payload)
 
@@ -982,9 +1070,10 @@ class SOCPServer:
             }
 
         return {
-            "server_id": self.current_server_id,
-            "local_users": list(self.local_users.keys()),
-            "known_servers": dict(self.server_addrs),
+            "server_id": self.local_server.id,
+            "local_users": list(self.users.keys()),
+            # TODO: Check for compliance with SOCP spec
+            "known_servers": {sid: (rec.endpoint.host, rec.endpoint.port) for sid, rec in self.servers.items()},
             "server_links": server_links,
             "heartbeat_interval": self.heartbeat_interval,
             "heartbeat_timeout": self.heartbeat_timeout,
@@ -1007,10 +1096,9 @@ class SOCPServer:
         payload = {"code": error_code, "detail": detail}
         envelope = create_envelope(
             "ERROR",
-            self.current_server_id,
+            self.local_server.id,
             target,
             payload,
-            signature=self.local_pubkey,
         )
         await connection.send_message(envelope)
     
@@ -1022,8 +1110,6 @@ class SOCPServer:
         close_reason: Optional[str] = None,
     ) -> None:
         """Clean up when connection closes"""
-        self.all_connections.discard(connection)
-
         if connection.user_id:
             await self.cleanup_user_connection(connection.user_id)
         elif connection.server_id:
@@ -1033,21 +1119,17 @@ class SOCPServer:
     
     async def cleanup_user_connection(self, user_id: str) -> None:
         """Clean up user connection and broadcast USER_REMOVE"""
-        if user_id in self.local_users:
-            del self.local_users[user_id]
-        if user_id in self.user_locations:
-            del self.user_locations[user_id]
         if user_id in self.users:
             del self.users[user_id]
-        
+
+       
         # Broadcast USER_REMOVE
-        payload = {"user_id": user_id, "server_id": self.current_server_id}
+        payload = {"user_id": user_id, "server_id": self.local_server.id}
         envelope = create_envelope(
             "USER_REMOVE",
-            self.current_server_id,
+            self.local_server.id,
             "*",
             payload,
-            signature=self.local_pubkey,
         )
         
         for server_link in self._iter_server_links():
@@ -1061,9 +1143,11 @@ class SOCPServer:
             del self.servers[server_id]
             
         # Remove any user_locations that point to this server as host
-        stale_users = [u for u, loc in self.user_locations.items() if loc == server_id]
+        stale_users = [u for u, loc in self.users.items() if loc == server_id]
         for u in stale_users:
-            del self.user_locations[u]
+            #del self.user_locations[u]
+            #TODO: Check for compliance with SOCP spec
+            del self.users[u]
             
         # TODO: Attempt reconnection after delay
         
@@ -1073,7 +1157,7 @@ class SOCPServer:
 async def main():
     """Main entry point"""
 
-    server = SOCPServer(host="localhost", port=8765)
+    server = SOCPServer(storage_path=Path("~/.server"), host="localhost", port=8765)
     await server.start_server()
 if __name__ == "__main__":
     asyncio.run(main())
