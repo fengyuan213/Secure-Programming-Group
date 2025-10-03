@@ -49,4 +49,17 @@ class ClientSession:
         if self.websocket:
             await self.websocket.close(code=1000)
 
+    async def reconnect(self, max_retries: int = 5, base_delay: float = 1.0) -> bool:
+        """Reconnect with exponential backoff"""
+        for attempt in range(max_retries):
+            try:
+                delay = base_delay * (2 ** attempt)
+                logger.info(f"Reconnecting in {delay}s (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(delay)
+                await self.connect()
+                return True
+            except Exception as e:
+                logger.warning(f"Reconnect attempt {attempt + 1} failed: {e}")
+        return False
+
 
