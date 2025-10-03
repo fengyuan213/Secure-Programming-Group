@@ -15,10 +15,10 @@ from rich.table import Table
 
 from shared.envelope import create_envelope
 from shared.log import get_logger
-from .keys import RSAKeypair, load_keypair, save_keypair
+from shared.crypto.keys import RSAKeypair, load_keypair, save_keypair
 from .state import Presence
-from .pubdir import PubKeyDirectory
-from .crypto import rsa_oaep_encrypt, rsassa_pss_sign, rsassa_pss_verify, rsa_oaep_decrypt
+from client.pubdir import PubKeyDirectory
+from shared.crypto.crypto import rsa_oaep_encrypt, rsassa_pss_sign, rsassa_pss_verify, rsa_oaep_decrypt
 from .ws_client import ClientSession
 
 app = typer.Typer(help="SOCP v1.3 Client CLI")

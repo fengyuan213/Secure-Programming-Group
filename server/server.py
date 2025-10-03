@@ -21,6 +21,8 @@ import websockets
 
 from server.core.ConnectionLink import ConnectionLink
 from server.core.MessageCache import MessageDeduplicationCache
+from server.core.MessageTypes import MessageType, ConnectionType
+from server.core.MessageHandlers import SERVER_HANDLER_REGISTRY, USER_HANDLER_REGISTRY
 from shared.envelope import Envelope, create_envelope
 from shared.utils import is_uuid_v4
 from shared.log import get_logger
@@ -374,7 +376,7 @@ class SOCPServer:
                     link = ConnectionLink(ws,self.signer, connection_type="server")
                     # Send SERVER_HELLO_JOIN to introducer (to=host:port per spec)
                     join_env = create_envelope(
-                        "SERVER_HELLO_JOIN",
+                        MessageType.SERVER_HELLO_JOIN.value,
                         self.local_server.id,
                         f"{host}:{port}",
                         {"host": self.local_server.endpoint.host, "port": self.local_server.endpoint.port, "pubkey": self.local_server.pubkey},
@@ -386,7 +388,7 @@ class SOCPServer:
                         if isinstance(raw, bytes):
                             raw = raw.decode("utf-8")
                         welcome = Envelope.from_json(raw)
-                        if welcome.type == "SERVER_WELCOME":
+                        if welcome.type == MessageType.SERVER_WELCOME.value:
                             assigned = welcome.payload.get("assigned_id")
                             if isinstance(assigned, str) and is_uuid_v4(assigned):
                                 if assigned != self.local_server.id:
@@ -450,7 +452,7 @@ class SOCPServer:
                     stale_links.append(link)
                     continue
                 heartbeat = create_envelope(
-                    "HEARTBEAT",
+                    MessageType.HEARTBEAT.value,
                     self.local_server.id,
                     server_id,
                     {},
@@ -492,7 +494,7 @@ class SOCPServer:
 
                 # Identify ourselves with SERVER_HELLO_LINK (to = remote server_id)
                 link_env = create_envelope(
-                    "SERVER_HELLO_LINK",
+                    MessageType.SERVER_HELLO_LINK.value,
                     self.local_server.id,
                     server_id,
                     {"host": self.local_server.endpoint.host, "port": self.local_server.endpoint.port, "pubkey": self.local_server.pubkey},
@@ -557,11 +559,11 @@ class SOCPServer:
             logger.info(f"First message type: {envelope.type} from {envelope.from_}")
             
             # Identify connection type based on first message
-            if envelope.type == "USER_HELLO":
+            if envelope.type == MessageType.USER_HELLO.value:
                 await self.handle_user_hello(connection, envelope)
-            elif envelope.type == "SERVER_HELLO_JOIN":
+            elif envelope.type == MessageType.SERVER_HELLO_JOIN.value:
                 await self.handle_server_hello_join(connection, envelope)
-            elif envelope.type == "SERVER_HELLO_LINK":
+            elif envelope.type == MessageType.SERVER_HELLO_LINK.value:
                 await self.handle_server_hello_link(connection, envelope)
             else:
                 raise ValueError(f"Invalid first message type: {envelope.type}")
@@ -671,7 +673,7 @@ class SOCPServer:
             
         }
         welcome_envelope = create_envelope(
-            "SERVER_WELCOME",
+            MessageType.SERVER_WELCOME.value,
             self.local_server.id,
             assigned_server_id,
             welcome_payload
@@ -725,305 +727,98 @@ class SOCPServer:
             )
     
     async def handle_user_message(self, connection: ConnectionLink, envelope: Envelope) -> None:
-        """Handle messages from user connections"""
-        msg_type = envelope.type
-        if msg_type != "MSG_DIRECT":
-            logger.warning("Unsupported user message type %s", msg_type)
+        """
+        Handle messages from user connections using registry dispatch.
+        
+        Routes the message to the appropriate handler based on message type.
+        """
+        # Validate and parse message type
+        if not MessageType.is_valid(envelope.type):
+            logger.warning("Unknown user message type: %s", envelope.type)
             await self.send_error(
                 connection,
-                "UNSUPPORTED",
-                f"Unhandled user message type {msg_type}",
+                "UNKNOWN_TYPE",
+                f"Unknown message type: {envelope.type}",
                 to_id=connection.user_id,
             )
             return
-
-        sender_id = connection.user_id
-        if sender_id is None or sender_id != envelope.from_:
+        
+        msg_type = MessageType(envelope.type)
+        
+        # Look up handler in registry
+        handler = USER_HANDLER_REGISTRY.get(msg_type)
+        if handler is None:
+            logger.warning("Unimplemented user message type: %s", msg_type.value)
             await self.send_error(
                 connection,
-                "BAD_SENDER",
-                "Envelope sender mismatch",
-                to_id=envelope.from_,
+                "UNSUPPORTED",
+                f"Message type {msg_type.value} not yet implemented",
+                to_id=connection.user_id,
             )
             return
-
-        recipient_id = envelope.to
-        if not is_uuid_v4(recipient_id):
+        
+        # Dispatch to handler
+        try:
+            await handler(self, connection, envelope)
+        except Exception as exc:
+            logger.error("Error handling user message %s: %s", msg_type.value, exc, exc_info=True)
             await self.send_error(
                 connection,
-                "BAD_RECIPIENT",
-                "Recipient must be UUIDv4",
-                to_id=sender_id,
+                "INTERNAL_ERROR",
+                f"Failed to process {msg_type.value}",
+                to_id=connection.user_id,
             )
-            return
-
-        payload = envelope.payload
-        required_fields = {
-            "ciphertext",
-            "iv",
-            "tag",
-            "wrapped_key",
-            "sender_pub",
-            "content_sig",
-        }
-        if not required_fields.issubset(payload.keys()):
-            missing = required_fields - set(payload.keys())
-            await self.send_error(
-                connection,
-                "BAD_PAYLOAD",
-                f"Missing fields: {sorted(missing)}",
-                to_id=sender_id,
-            )
-            return
-
-        base_payload = {
-            "ciphertext": payload["ciphertext"],
-            "iv": payload["iv"],
-            "tag": payload["tag"],
-            "wrapped_key": payload["wrapped_key"],
-            "sender": payload.get("sender", sender_id),
-            "sender_pub": payload["sender_pub"],
-            "content_sig": payload["content_sig"],
-        }
-        # TODO: Remove local_users and user_locations and use servers and users instead
-        # Prefer authoritative routing table, fall back to live local link check.
-        rec = self.users.get(recipient_id)
-        location = getattr(rec, "location", None)
-        if location == "local" or recipient_id in self.users:
-            local_link = getattr(rec, "link", None)
-            if not local_link:
-                await self.send_error(
-                    connection,
-                    "NO_ROUTE",
-                    f"Recipient {recipient_id} not connected",
-                    to_id=sender_id,
-                )
-                return
-            deliver_env = create_envelope(
-                "USER_DELIVER",
-                self.local_server.id,
-                recipient_id,
-                base_payload,
-            )
-            await local_link.send_message(deliver_env)
-            logger.info("Delivered direct message from %s to local user %s", sender_id, recipient_id)
-            return
-
-        if isinstance(location, str) and is_uuid_v4(location):
-            server_link = self._resolve_server_link(location)
-            if not server_link:
-                await self.send_error(
-                    connection,
-                    "NO_ROUTE",
-                    f"No server link for {location}",
-                    to_id=sender_id,
-                )
-                return
-
-            server_payload = {"user_id": recipient_id, **base_payload}
-            server_env = create_envelope(
-                "SERVER_DELIVER",
-                self.local_server.id,
-                location,
-                server_payload,
-            )
-            await server_link.send_message(server_env)
-            logger.info(
-                "Forwarded message from %s to remote user %s via server %s",
-                sender_id,
-                recipient_id,
-                location,
-            )
-            return
-
-        await self.send_error(
-            connection,
-            "NO_ROUTE",
-            f"No route to {recipient_id}",
-            to_id=sender_id,
-        )
     
     async def handle_server_message(self, connection: ConnectionLink, envelope: Envelope) -> None:
-        """Handle messages from server connections"""  
-        # TODO: Implement server message handling (USER_ADVERTISE, SERVER_DELIVER, etc.)
-        msg_type = envelope.type
+        """
+        Handle messages from server connections using registry dispatch.
+        
+        Routes the message to the appropriate handler based on message type.
+        """
         origin_server_id = envelope.from_
         logger.info(
             "Server message %s from %s via link %s",
-            msg_type,
+            envelope.type,
             origin_server_id,
             connection.server_id,
         )
-
-        if msg_type == "HEARTBEAT":
-            connection.last_seen = time.monotonic()
-            logger.debug("Heartbeat received from %s", origin_server_id)
+        
+        # Validate and parse message type
+        if not MessageType.is_valid(envelope.type):
+            logger.warning("Unknown server message type: %s", envelope.type)
+            await self.send_error(
+                connection,
+                "UNKNOWN_TYPE",
+                f"Unknown message type: {envelope.type}",
+                to_id=origin_server_id,
+            )
             return
-
-
-        if msg_type == "SERVER_ANNOUNCE":
-            # May be unsigned per spec; use it to pin/update address and pubkey for the sender
-            payload = envelope.payload
-            host = payload.get("host")
-            port = payload.get("port")
-            pubkey = payload.get("pubkey", "")
-            if not (isinstance(host, str) and isinstance(port, int)):
-                await self.send_error(
-                    connection,
-                    "BAD_PAYLOAD",
-                    "Malformed SERVER_ANNOUNCE payload",
-                    to_id=envelope.from_,
-                )
-                return
-            # Preserve existing link if any, update endpoint and pubkey
-            existing = self.servers.get(origin_server_id)
-            link = existing if isinstance(existing, ConnectionLink) else getattr(existing, "link", None)
-            self.add_update_server(origin_server_id, ServerEndpoint(host=host, port=port), link, pubkey)
-            logger.info("Updated server %s from SERVER_ANNOUNCE to %s:%s", origin_server_id, host, port)
+        
+        msg_type = MessageType(envelope.type)
+        
+        # Look up handler in registry
+        handler = SERVER_HANDLER_REGISTRY.get(msg_type)
+        if handler is None:
+            logger.warning("Unimplemented server message type: %s", msg_type.value)
+            await self.send_error(
+                connection,
+                "UNSUPPORTED",
+                f"Message type {msg_type.value} not yet implemented",
+                to_id=origin_server_id,
+            )
             return
-
-
-        # PRESENCE GOSSIP: maintain user_locations
-        if msg_type in {"USER_ADVERTISE", "USER_REMOVE"}:
-            payload = envelope.payload
-            user_id = payload.get("user_id")
-            server_id = payload.get("server_id")
-
-            if not (isinstance(user_id, str) and isinstance(server_id, str)):
-                await self.send_error(
-                    connection,
-                    "UNKNOWN_TYPE",
-                    f"Malformed {msg_type} payload",
-                    to_id=envelope.from_,
-                )
-                return
-
-            # Ensure we trust the sending server before mutating shared state
-            if not self._verify_server_signature(origin_server_id, envelope):
-                logger.warning(
-                    "Rejected %s from %s due to signature mismatch",
-                    msg_type,
-                    origin_server_id,
-                )
-                return
-
-            if server_id != origin_server_id:
-                logger.debug(
-                    "Forwarded %s claims host %s while signed by %s", msg_type, server_id, origin_server_id
-                )
-
-            if msg_type == "USER_ADVERTISE":
-                # Advertise: map the user to the announced hosting server
-                #self.user_locations[user_id] = server_id
-                #self.users[user_id] = UserRecord(id=user_id, link=None, location=server_id)
-                self.add_update_user(user_id, None, server_id)
-            else:
-                # USER_REMOVE: only delete if mapping still matches the sender's claim
-                rec = self.users.get(user_id)
-                if getattr(rec, "location", None) == server_id:
-                    del self.users[user_id]
-                if user_id in self.users and getattr(self.users[user_id], "location", None) == server_id:
-                    del self.users[user_id]
-
-            # Gossip to other connected servers unchanged
-            for link in self._iter_server_links():
-                if link is connection:
-                    continue
-                if link.server_id and link.server_id == origin_server_id:
-                    continue
-                logger.debug(
-                    "Forwarding %s for %s to server %s",
-                    msg_type,
-                    user_id,
-                    link.server_id,
-                )
-                await link.send_message(envelope)
-            return
-
-        if msg_type == "SERVER_DELIVER":
-            # Duplicate suppression per SOCP §10
-            if self.message_cache.check_and_mark(envelope):
-                logger.debug("Dropping duplicate SERVER_DELIVER from %s", origin_server_id)
-                return
-            
-            if not self._verify_server_signature(origin_server_id, envelope):
-                logger.warning("SERVER_DELIVER failed signature from %s", origin_server_id)
-                return
-
-            payload = envelope.payload
-            user_id = payload.get("user_id")
-            if not isinstance(user_id, str) or not is_uuid_v4(user_id):
-                await self.send_error(
-                    connection,
-                    "BAD_PAYLOAD",
-                    "SERVER_DELIVER missing valid user_id",
-                    to_id=origin_server_id,
-                )
-                return
-
-            rec = self.users.get(user_id)
-            target_location = getattr(rec, "location", None)
-            if target_location == "local" or user_id in self.users:
-                local_link = getattr(rec, "link", None)
-                if not local_link:
-                    logger.warning("SERVER_DELIVER for %s but user not connected", user_id)
-                    return
-                required_fields = {
-                    "ciphertext",
-                    "iv",
-                    "tag",
-                    "wrapped_key",
-                    "sender",
-                    "sender_pub",
-                    "content_sig",
-                }
-                if not required_fields.issubset(payload.keys()):
-                    await self.send_error(
-                        connection,
-                        "BAD_PAYLOAD",
-                        "SERVER_DELIVER missing ciphertext fields",
-                        to_id=origin_server_id,
-                    )
-                    return
-                deliver_payload = {
-                    "ciphertext": payload["ciphertext"],
-                    "iv": payload["iv"],
-                    "tag": payload["tag"],
-                    "wrapped_key": payload["wrapped_key"],
-                    "sender": payload["sender"],
-                    "sender_pub": payload["sender_pub"],
-                    "content_sig": payload["content_sig"],
-                }
-                deliver_env = create_envelope(
-                    "USER_DELIVER",
-                    self.local_server.id,
-                    user_id,
-                    deliver_payload,
-                )
-                await local_link.send_message(deliver_env)
-                logger.info("Delivered SERVER_DELIVER payload to local user %s", user_id)
-                return
-
-            if isinstance(target_location, str) and is_uuid_v4(target_location):
-                if target_location == origin_server_id:
-                    logger.debug("SERVER_DELIVER already at destination %s; dropping", target_location)
-                    return
-                link = self._resolve_server_link(target_location)
-                if not link:
-                    logger.warning(
-                        "No link to forward SERVER_DELIVER for %s via %s", user_id, target_location
-                    )
-                    return
-                await link.send_message(envelope)
-                logger.info(
-                    "Forwarded SERVER_DELIVER for %s toward server %s", user_id, target_location
-                )
-                return
-
-            logger.warning("Dropping SERVER_DELIVER for unknown user %s", user_id)
-            return
-
-        # TODO: Other server message types will be implemented later
+        
+        # Dispatch to handler
+        try:
+            await handler(self, connection, envelope)
+        except Exception as exc:
+            logger.error("Error handling server message %s: %s", msg_type.value, exc, exc_info=True)
+            await self.send_error(
+                connection,
+                "INTERNAL_ERROR",
+                f"Failed to process {msg_type.value}",
+                to_id=origin_server_id,
+            )
     
     async def broadcast_user_advertise(self, user_id: str, meta: Dict[str, Any]) -> None:
         """Broadcast USER_ADVERTISE to all connected servers"""
@@ -1033,7 +828,7 @@ class SOCPServer:
             "meta": meta
         }
         envelope = create_envelope(
-            "USER_ADVERTISE",
+            MessageType.USER_ADVERTISE.value,
             self.local_server.id,
             "*",
             payload,
@@ -1056,7 +851,7 @@ class SOCPServer:
         #self.server_addrs[server_id] = (server_info["host"], server_info["port"])
         #self.server_pubkeys[server_id] = server_info.get("pubkey", "")
 
-        envelope = create_envelope("SERVER_ANNOUNCE", server_id, "*", payload)
+        envelope = create_envelope(MessageType.SERVER_ANNOUNCE.value, server_id, "*", payload)
 
         # Send to all other connected servers
         for other_server_id, value in self.servers.items():
@@ -1111,7 +906,7 @@ class SOCPServer:
             return
         payload = {"code": error_code, "detail": detail}
         envelope = create_envelope(
-            "ERROR",
+            MessageType.ERROR.value,
             self.local_server.id,
             target,
             payload,
@@ -1142,7 +937,7 @@ class SOCPServer:
         # Broadcast USER_REMOVE
         payload = {"user_id": user_id, "server_id": self.local_server.id}
         envelope = create_envelope(
-            "USER_REMOVE",
+            MessageType.USER_REMOVE.value,
             self.local_server.id,
             "*",
             payload,
