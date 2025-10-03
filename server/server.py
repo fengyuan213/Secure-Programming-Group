@@ -20,6 +20,7 @@ from shared.crypto.signer import RSAServerTransportSigner
 import websockets
 
 from server.core.ConnectionLink import ConnectionLink
+from server.core.MessageCache import MessageDeduplicationCache
 from shared.envelope import Envelope, create_envelope
 from shared.utils import is_uuid_v4
 from shared.log import get_logger
@@ -90,6 +91,7 @@ class SOCPServer:
         *,
         heartbeat_interval: float = 15.0,
         heartbeat_timeout: float = 45.0,
+        dedup_ttl: float = 120.0,
     ):
         
         # These two are single source of truth for all servers and users on the network.
@@ -100,6 +102,9 @@ class SOCPServer:
 
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
+        
+        # Duplicate suppression per SOCP §10
+        self.message_cache = MessageDeduplicationCache(ttl=dedup_ttl)
 
         # Initialize storage path for pubkey directory
         self.keypair =  self._load_or_create_server_key()
@@ -426,10 +431,15 @@ class SOCPServer:
             await asyncio.sleep(2)
 
     async def _health_loop(self) -> None:
-        """Periodically send heartbeats and close stale server links."""
+        """Periodically send heartbeats, close stale server links, and prune message cache."""
         while True:
             await asyncio.sleep(self.heartbeat_interval)
             now = time.monotonic()
+            
+            # Prune expired message IDs from deduplication cache
+            self.message_cache.prune_expired()
+            
+            # Check for stale connections and send heartbeats
             stale_links: list[ConnectionLink] = []
             for link in list(self._iter_server_links()):
                 server_id = getattr(link, "server_id", None)
@@ -931,6 +941,11 @@ class SOCPServer:
             return
 
         if msg_type == "SERVER_DELIVER":
+            # Duplicate suppression per SOCP §10
+            if self.message_cache.check_and_mark(envelope):
+                logger.debug("Dropping duplicate SERVER_DELIVER from %s", origin_server_id)
+                return
+            
             if not self._verify_server_signature(origin_server_id, envelope):
                 logger.warning("SERVER_DELIVER failed signature from %s", origin_server_id)
                 return
@@ -1077,6 +1092,7 @@ class SOCPServer:
             "server_links": server_links,
             "heartbeat_interval": self.heartbeat_interval,
             "heartbeat_timeout": self.heartbeat_timeout,
+            "message_cache": self.message_cache.stats(),
         }
 
 
