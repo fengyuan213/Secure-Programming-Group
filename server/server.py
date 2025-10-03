@@ -1023,7 +1023,7 @@ class SOCPServer:
             del self.servers[server_id]
             
         # Remove any user_locations that point to this server as host
-        stale_users = [u for u, loc in self.users.items() if loc == server_id]
+        stale_users = [user_id for user_id, record in self.users.items() if getattr(record, "location", None) == server_id]
         for u in stale_users:
             #del self.user_locations[u]
             #TODO: Check for compliance with SOCP spec
