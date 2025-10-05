@@ -54,9 +54,6 @@ class RSAServerTransportSigner(Signer):
     
         # Return base64url encoded signature
         return signature
-    def verify(self, data: Dict[str, Any], signature: str) -> bool:
-        """Verify signature"""
-        return rsassa_pss_verify(self.keypair.public_pem, json.dumps(data, separators=(',', ':'), sort_keys=True).encode(), signature)
     def get_public_key(self) -> str:
         """Get public key in base64url format"""
         return self.keypair.public_b64url()

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from os import name
 from typing import TYPE_CHECKING, Callable, Awaitable, Dict, Set, Any, Optional
 
+from server.core.MemoryTable import ServerRecord, UserRecord
 from server.core.MessageTypes import MessageType
 from shared.envelope import Envelope, create_envelope
 from shared.utils import is_uuid_v4
@@ -19,7 +21,7 @@ MessageHandler = Callable[["SOCPServer", "ConnectionLink", Envelope], Awaitable[
 class DMRecipientRouter:
     def __init__(self, server: "SOCPServer", connection: "ConnectionLink", sender_id: str, recipient_id: str):
         self.server = server
-        self.connection = connection
+        self.in_connection = connection
         self.sender_id = sender_id
         self.recipient_id = recipient_id
         self.envelope_delivered_local:Optional[Envelope] = None
@@ -35,140 +37,32 @@ class DMRecipientRouter:
         return self
 
     async def run(self) -> bool:
-        rec = self.server.users.get(self.recipient_id)
-        location = getattr(rec, "location", None)
-
+        destionation_user = self.server.users.get(self.recipient_id)
+        if destionation_user is None or not destionation_user.is_connected():
+            await self.in_connection.on_error_user_not_found(
+                f"Recipient {self.recipient_id} not connected", to_id=self.sender_id
+            )
+            return False
         # Case 1: Local
-        if location == "local":
-            local_link = getattr(rec, "link", None)
-            if not local_link:
-                await self.server.send_error(
-                    self.connection,
-                    "NO_ROUTE",
-                    f"Recipient {self.recipient_id} not connected",
-                    to_id=self.sender_id,
-                )
-                return False
-
+        if destionation_user.is_local():
             if not self.envelope_delivered_local:
                 raise RuntimeError("No local_variant supplied")
-
-            await local_link.send_message(self.envelope_delivered_local)
-            logger.info("Delivered %s from %s to local user %s",self.envelope_delivered_local.type, self.sender_id, self.recipient_id)
-            
+            await GenericRouters.route_to_local(destionation_user, self.envelope_delivered_local, self.sender_id)
+      
             return True
-
+        
         # Case 2: Remote
-        if isinstance(location, str) and is_uuid_v4(location):
-            server_link = self.server._resolve_server_link(location)
-            if not server_link:
-                await self.server.send_error(
-                    self.connection,
-                    "NO_ROUTE",
-                    f"No server link for {location}",
-                    to_id=self.sender_id,
-                )
-                return False
-
+        if destionation_user.is_remote():
             if not self.envelope_delivered_remote:
                 raise RuntimeError("No remote_variant supplied")
-
-            await server_link.send_message(self.envelope_delivered_remote)
-            logger.info("Forwarded %s from %s to server %s for user %s", self.envelope_delivered_remote.type, self.sender_id, location, self.recipient_id)
+            
+            success = await GenericRouters.route_to_another_server(
+                self.server, self.in_connection, destionation_user, 
+                self.envelope_delivered_remote)
           
-            return True
-
-        # Case 3: No route
-        await self.server.send_error(
-            self.connection,
-            "NO_ROUTE",
-            f"No route to recipient {self.recipient_id}",
-            to_id=self.sender_id,
-        )
+            return success
+        
         return False
-class GenericValidators:
-    """
-    Generic reusable validators for message validation (SOCP compliance).
-    Can be used across different message types.
-    """
-    
-    @staticmethod
-    async def validate_sender(
-        server: "SOCPServer",
-        connection: "ConnectionLink",
-        envelope: Envelope,
-    ) -> Optional[str]:
-        """Validate that envelope sender matches the connected user."""
-        sender_id = connection.user_id
-        if sender_id is None or sender_id != envelope.from_:
-            await server.send_error(
-                connection,
-                "BAD_SENDER",
-                "Envelope sender mismatch",
-                to_id=envelope.from_,
-            )
-            return None
-        return sender_id
-    
-    @staticmethod
-    async def validate_uuid_field(
-        server: "SOCPServer",
-        connection: "ConnectionLink",
-        field_value: Any,
-        field_name: str,
-        sender_id: str,
-    ) -> bool:
-        """Validate that a field is a valid UUIDv4."""
-        if not isinstance(field_value, str) or not is_uuid_v4(field_value):
-            await server.send_error(
-                connection,
-                "BAD_PAYLOAD",
-                f"{field_name} must be valid UUIDv4",
-                to_id=sender_id,
-            )
-            return False
-        return True
-    
-    @staticmethod
-    async def validate_required_fields(
-        server: "SOCPServer",
-        connection: "ConnectionLink",
-        payload: Dict,
-        required_fields: Set[str],
-        sender_id: str,
-    ) -> bool:
-        """Validate that payload contains all required fields."""
-        if not required_fields.issubset(payload.keys()):
-            missing = required_fields - set(payload.keys())
-            await server.send_error(
-                connection,
-                "BAD_PAYLOAD",
-                f"Missing required fields: {sorted(missing)}",
-                to_id=sender_id,
-            )
-            return False
-        return True
-    
-    @staticmethod
-    async def validate_enum_field(
-        server: "SOCPServer",
-        connection: "ConnectionLink",
-        field_value: Any,
-        field_name: str,
-        allowed_values: Set[str],
-        sender_id: str,
-    ) -> bool:
-        """Validate that a field has one of the allowed enum values."""
-        if field_value not in allowed_values:
-            await server.send_error(
-                connection,
-                "BAD_PAYLOAD",
-                f"{field_name} must be one of {sorted(allowed_values)}",
-                to_id=sender_id,
-            )
-            return False
-        return True
-
 
 class GenericRouters:
     """
@@ -177,6 +71,64 @@ class GenericRouters:
     
     Note: DM routing now uses DMRecipientRouter builder pattern for better flexibility.
     """
+    
+    @staticmethod
+    async def route_to_local( destionation_user: UserRecord, envelope: Envelope,sender_id: str) -> None:
+        """
+        Route message to local user.
+        
+        Args:
+            user_info: The local user record (must have link)
+            envelope: The envelope to send
+        """
+        await destionation_user.send_message(envelope)
+        logger.info("Delivered %s from %s to local user %s", 
+                envelope.type, sender_id, destionation_user.id)
+    
+    @staticmethod
+    async def route_to_another_server(
+        server: "SOCPServer",
+        connection: "ConnectionLink",
+        user_info: UserRecord,
+        envelope: Envelope,
+    ) -> bool:
+        """
+        Route message to another server.
+        
+        Args:
+            server: The SOCP server instance
+            connection: The connection that initiated this routing (for error responses)
+            user_info: The remote user record
+            envelope: The envelope to forward
+            sender_id: The original sender (for error messages)
+            
+        Returns:
+            True if successfully routed, False otherwise
+        """ 
+        server_info = user_info.resolve_server(server.servers)
+        sender_id = connection.user_id
+        if not sender_id:
+            raise ValueError("Sender ID is required")
+        if not server_info or not server_info.is_connected():
+            # Send error back to the ORIGINAL SENDER
+            await connection.on_error_user_not_found(
+                f"No server link for {user_info.location}", to_id=sender_id
+            )
+            return False
+
+        await server_info.send_message(envelope)
+        logger.info("Forwarded %s from %s to server %s for user %s", envelope.type, sender_id, user_info.location, user_info.id)
+        return True
+   
+    @staticmethod
+    async def envelope_wrapper_server_deliver(envelope: Envelope) -> Envelope:
+        """YESEXPR
+        Wrapper for SERVER_DELIVER messages to add the user_id field.
+        """
+        deliver_envelope = create_envelope(MessageType.SERVER_DELIVER.value, envelope.from_, envelope.to,envelope.to_dict())
+       
+        deliver_envelope.payload["user_id"] = envelope.to
+        return deliver_envelope
     
     @staticmethod
     async def route_to_public_channel(
@@ -202,12 +154,7 @@ class GenericRouters:
         """
         # Check authorization
         if not hasattr(server, 'public_channel') or sender_id not in server.public_channel.get_members():
-            await server.send_error(
-                connection,
-                "UNAUTHORIZED",
-                "Not a member of public channel",
-                to_id=sender_id,
-            )
+            await connection.on_error_bad_key("Not a member of public channel", to_id=sender_id)
             return False
         
         # Get all channel members
@@ -244,81 +191,72 @@ class GenericRouters:
         logger.info("Broadcasted %s from %s to public channel (%d members)", message_type, sender_id, len(members))
         return True
     
-    @staticmethod
-    async def relay_server_to_dm_recipient(
-        server: "SOCPServer",
-        envelope: Envelope,
-        message_type: str,
-    ) -> None:
-        """
-        Generic relay for server-forwarded DM messages.
-        No error handling - pure relay from server to local user or next hop.
-        """
-        recipient_id = envelope.to
-        payload = envelope.payload
-        sender_id = envelope.from_
-        
-        # Extract user_id if wrapped in SERVER_DELIVER
-        if "user_id" in payload:
-            recipient_id = payload["user_id"]
-        
-        # Check routing table
-        rec = server.users.get(recipient_id)
-        location = getattr(rec, "location", None)
-        
-        # Local delivery
-        if location == "local":
-            local_link = getattr(rec, "link", None)
-            if local_link:
-                deliver_env = create_envelope(
-                    message_type,
-                    sender_id,
-                    recipient_id,
-                    payload,
-                )
-                await local_link.send_message(deliver_env)
-                logger.debug("Relayed %s to local user %s", message_type, recipient_id)
-            return
-        
-        # Forward to next hop
-        if isinstance(location, str) and is_uuid_v4(location):
-            server_link = server._resolve_server_link(location)
-            if server_link:
-                await server_link.send_message(envelope)
-                logger.debug("Forwarded %s to server %s", message_type, location)
+class GenericValidators:
+    """
+    Generic reusable validators for message validation (SOCP compliance).
+    Can be used across different message types.
+    """
     
     @staticmethod
-    async def relay_server_to_public_channel(
+    async def validate_sender(
         server: "SOCPServer",
+        connection: "ConnectionLink",
         envelope: Envelope,
-        message_type: str,
-    ) -> None:
-        """
-        Generic relay for server-forwarded public channel messages.
-        Delivers to local members only - no re-broadcasting.
-        """
-        if not hasattr(server, 'public_channel'):
-            return
-        
-        members = server.public_channel.get_members()
-        payload = envelope.payload
-        sender_id = envelope.from_
-        
-        # Deliver to all local members
-        for member_id in members:
-            user_rec = server.users.get(member_id)
-            if getattr(user_rec, "location", None) == "local":
-                local_link = getattr(user_rec, "link", None)
-                if local_link:
-                    deliver_env = create_envelope(
-                        message_type,
-                        sender_id,
-                        "public",
-                        payload,
-                    )
-                    await local_link.send_message(deliver_env)
-        
-        logger.debug("Relayed %s to local public channel members", message_type)
+    ) -> Optional[str]:
+        """Validate that envelope sender matches the connected user."""
+        sender_id = connection.user_id
+        if sender_id is None or sender_id != envelope.from_:
+            await connection.on_error_invalid_sig("Envelope sender mismatch", to_id=envelope.from_)
+            return None
+        return sender_id
+    
+    @staticmethod
+    async def validate_uuid_field(
+        server: "SOCPServer",
+        connection: "ConnectionLink",
+        field_value: Any,
+        field_name: str,
+        sender_id: str,
+    ) -> bool:
+        """Validate that a field is a valid UUIDv4."""
+        if not isinstance(field_value, str) or not is_uuid_v4(field_value):
+            await connection.on_error_bad_key(f"{field_name} must be valid UUIDv4", to_id=sender_id)
+            return False
+        return True
+    
+    @staticmethod
+    async def validate_required_fields(
+        server: "SOCPServer",
+        connection: "ConnectionLink",
+        payload: Dict,
+        required_fields: Set[str],
+        sender_id: str,
+    ) -> bool:
+        """Validate that payload contains all required fields."""
+        if not required_fields.issubset(payload.keys()):
+            missing = required_fields - set(payload.keys())
+            await connection.on_error_bad_key(
+                f"Missing required fields: {sorted(missing)}", to_id=sender_id
+            )
+            return False
+        return True
+    
+    @staticmethod
+    async def validate_enum_field(
+        server: "SOCPServer",
+        connection: "ConnectionLink",
+        field_value: Any,
+        field_name: str,
+        allowed_values: Set[str],
+        sender_id: str,
+    ) -> bool:
+        """Validate that a field has one of the allowed enum values."""
+        if field_value not in allowed_values:
+            await connection.on_error_bad_key(
+                f"{field_name} must be one of {sorted(allowed_values)}", to_id=sender_id
+            )
+            return False
+        return True
 
 
 class ServerMessageHandlers:
@@ -348,12 +286,7 @@ class ServerMessageHandlers:
         origin_server_id = envelope.from_
         
         if not (isinstance(host, str) and isinstance(port, int)):
-            await server.send_error(
-                connection,
-                "BAD_PAYLOAD",
-                "Malformed SERVER_ANNOUNCE payload",
-                to_id=origin_server_id,
-            )
+            await connection.on_error_bad_key("Malformed SERVER_ANNOUNCE payload", to_id=origin_server_id)
             return
         
         # Preserve existing link if any, update endpoint and pubkey
@@ -373,12 +306,7 @@ class ServerMessageHandlers:
         server_id = payload.get("server_id")
         
         if not (isinstance(user_id, str) and isinstance(server_id, str)):
-            await server.send_error(
-                connection,
-                "BAD_PAYLOAD",
-                f"Malformed {msg_type} payload",
-                to_id=origin_server_id,
-            )
+            await connection.on_error_bad_key(f"Malformed {msg_type} payload", to_id=origin_server_id)
             return
         
         # Verify signature before mutating shared state
@@ -387,6 +315,9 @@ class ServerMessageHandlers:
                 "Rejected %s from %s due to signature mismatch",
                 msg_type,
                 origin_server_id,
+            )
+            await connection.on_error_invalid_sig(
+                f"Signature verification failed for {msg_type}", to_id=origin_server_id
             )
             return
         
@@ -417,25 +348,12 @@ class ServerMessageHandlers:
                 link.server_id,
             )
             await link.send_message(envelope)
-    
     @staticmethod
-    async def handle_server_deliver(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
+    async def server_deliver_dm_message(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
         """Handle SERVER_DELIVER - route message to local or remote user."""
-        origin_server_id = envelope.from_
-        
-        # Duplicate suppression per SOCP §10
-        if server.message_cache.check_and_mark(envelope):
-            logger.debug("Dropping duplicate SERVER_DELIVER from %s", origin_server_id)
-            return
-        
-        # Verify signature
-        if not server._verify_server_signature(origin_server_id, envelope):
-            logger.warning("SERVER_DELIVER failed signature from %s", origin_server_id)
-            return
-        
         payload = envelope.payload
         user_id = payload.get("user_id")
-        
+        origin_server_id = envelope.from_
         if not await GenericValidators.validate_uuid_field(server, connection, user_id, "user_id", origin_server_id):
             return
         
@@ -476,15 +394,53 @@ class ServerMessageHandlers:
         # For remote, forward the original SERVER_DELIVER envelope as-is
         remote_env = envelope
         
-        # Use builder pattern for routing (sender_id is the original message sender for error context)
-        original_sender = payload["sender"]
-        result = await DMRecipientRouter(server, connection, original_sender, user_id) \
+        # Use builder pattern for routing
+        # Note: destination_user_id might be the origin server for error messages
+        result = await DMRecipientRouter(server, connection, origin_server_id, user_id) \
             .envelope_to_local(local_env) \
             .envelope_to_another_server(remote_env) \
             .run()
         
         if not result:
             logger.warning("Failed to route SERVER_DELIVER for user %s", user_id)
+            return
+    @staticmethod
+    async def handle_generic_server_deliver(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
+        """Handle SERVER_DELIVER - route message to local or remote user."""
+        origin_server_id = envelope.from_
+        
+        # Duplicate suppression per SOCP §10
+        if server.message_cache.check_and_mark(envelope):
+            logger.debug("Dropping duplicate SERVER_DELIVER from %s", origin_server_id)
+            return
+        
+        # Verify signature
+        if not server._verify_server_signature(origin_server_id, envelope):
+            logger.warning("SERVER_DELIVER failed signature from %s", origin_server_id)
+            await connection.on_error_invalid_sig(
+                "Signature verification failed for SERVER_DELIVER", to_id=origin_server_id
+            )
+            return
+        
+        wrapped_type = envelope.payload.get("type")
+        if wrapped_type is None:
+            # This is not a wrapped server deliver message
+            # It is a user dm message, direct sent to user
+            await ServerMessageHandlers.server_deliver_dm_message(server, connection, envelope)
+            return
+        if wrapped_type == MessageType.FILE_START.value:
+            await UserFileTransferHandlers.handle_file_start(server, connection, envelope)
+            return
+        if wrapped_type == MessageType.FILE_CHUNK.value:
+            await UserFileTransferHandlers.handle_file_chunk(server, connection, envelope)
+            return
+        if wrapped_type == MessageType.FILE_END.value:
+            await UserFileTransferHandlers.handle_file_end(server, connection, envelope)
+            return
+        if wrapped_type == MessageType.MSG_PUBLIC_CHANNEL.value:
+            await UserMessageHandlers.handle_msg_public_channel(server, connection, envelope)
+            return
+        
 
 
     @staticmethod
@@ -496,6 +452,9 @@ class ServerMessageHandlers:
         # Verify signature
         if not server._verify_server_signature(origin_server_id, envelope):
             logger.warning("PUBLIC_CHANNEL_ADD failed signature from %s", origin_server_id)
+            await connection.on_error_invalid_sig(
+                "Signature verification failed for PUBLIC_CHANNEL_ADD", to_id=origin_server_id
+            )
             return
         
         # Extract added users
@@ -528,6 +487,9 @@ class ServerMessageHandlers:
         # Verify signature
         if not server._verify_server_signature(origin_server_id, envelope):
             logger.warning("PUBLIC_CHANNEL_UPDATED failed signature from %s", origin_server_id)
+            await connection.on_error_invalid_sig(
+                "Signature verification failed for PUBLIC_CHANNEL_UPDATED", to_id=origin_server_id
+            )
             return
         
         # Extract version and wraps
@@ -589,6 +551,9 @@ class ServerMessageHandlers:
         # Verify signature
         if not server._verify_server_signature(origin_server_id, envelope):
             logger.warning("PUBLIC_CHANNEL_KEY_SHARE failed signature from %s", origin_server_id)
+            await connection.on_error_invalid_sig(
+                "Signature verification failed for PUBLIC_CHANNEL_KEY_SHARE", to_id=origin_server_id
+            )
             return
         
         # Extract shares
@@ -633,38 +598,6 @@ class ServerMessageHandlers:
                 continue
             await link.send_message(envelope)
     
-    @staticmethod
-    async def handle_msg_public_channel_server(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
-        """Handle MSG_PUBLIC_CHANNEL from another server - deliver to local members."""
-        sender_id = envelope.from_
-        payload = envelope.payload
-        
-        # Validate payload
-        required_fields = {"ciphertext", "iv", "tag", "sender_pub", "content_sig"}
-        if not required_fields.issubset(payload.keys()):
-            logger.warning("Malformed MSG_PUBLIC_CHANNEL from %s", sender_id)
-            return
-        
-        # Get local channel members
-        if not hasattr(server, 'public_channel'):
-            return
-        
-        members = server.public_channel.get_members()
-        
-        # Deliver to local members only
-        for member_id in members:
-            user_rec = server.users.get(member_id)
-            if getattr(user_rec, "location", None) == "local":
-                local_link = getattr(user_rec, "link", None)
-                if local_link:
-                    deliver_env = create_envelope(
-                        MessageType.MSG_PUBLIC_CHANNEL.value,
-                        sender_id,
-                        "public",
-                        payload,
-                    )
-                    await local_link.send_message(deliver_env)
-                    logger.debug("Delivered public channel message from %s to local user %s", sender_id, member_id)
 
 
 class UserMessageHandlers:
@@ -722,12 +655,7 @@ class UserMessageHandlers:
         rec = server.users.get(recipient_id)
         remote_server_id = getattr(rec, "location", None)
         if not isinstance(remote_server_id, str):
-            await server.send_error(
-                connection,
-                "BAD_PAYLOAD",
-                f"Recipient {recipient_id} has no location found",
-                to_id=sender_id,
-            )
+            await connection.on_error_user_not_found(f"Recipient {recipient_id} not found", to_id=sender_id)
             return
         remote_env = create_envelope(
             MessageType.SERVER_DELIVER.value,
@@ -752,7 +680,7 @@ class UserMessageHandlers:
         
         # Validate payload
         payload = envelope.payload
-        required_fields = {"ciphertext", "iv", "tag", "sender_pub", "content_sig"}
+        required_fields = {"ciphertext", "sender_pub", "content_sig"}
         if not await GenericValidators.validate_required_fields(
             server, connection, payload, required_fields, sender_id
         ):
@@ -761,8 +689,6 @@ class UserMessageHandlers:
         # Prepare broadcast payload
         broadcast_payload = {
             "ciphertext": payload["ciphertext"],
-            "iv": payload["iv"],
-            "tag": payload["tag"],
             "sender_pub": payload["sender_pub"],
             "content_sig": payload["content_sig"],
         }
@@ -791,6 +717,8 @@ class UserFileTransferHandlers:
         
         Payload: {file_id (UUID), name, size, sha256, mode ("dm"|"public")}
         """
+        # Envelop sent to another server need to be wrapped with msg type server deliver for delivering acrooss servers
+        server_deliver_envelope = await GenericRouters.envelope_wrapper_server_deliver(envelope) 
         # Validate sender
         sender_id = await GenericValidators.validate_sender(server, connection, envelope)
         if not sender_id:
@@ -821,16 +749,12 @@ class UserFileTransferHandlers:
         
         # Validate name and size
         if not isinstance(payload["name"], str) or not isinstance(payload["size"], int):
-            await server.send_error(
-                connection,
-                "BAD_PAYLOAD",
-                "name must be string and size must be integer",
-                to_id=sender_id,
-            )
+            await connection.on_error_bad_key("name must be string and size must be integer", to_id=sender_id)
             return
         
         # Route based on mode
         if mode == "dm":
+            
             recipient_id = envelope.to
             if not await GenericValidators.validate_uuid_field(
                 server, connection, recipient_id, "recipient (to field)", sender_id
@@ -840,7 +764,7 @@ class UserFileTransferHandlers:
             # FILE_START is forwarded as-is (same envelope for both local and remote)
             await DMRecipientRouter(server, connection, sender_id, recipient_id) \
                 .envelope_to_local(envelope) \
-                .envelope_to_another_server(envelope) \
+                .envelope_to_another_server(server_deliver_envelope) \
                 .run()
             logger.info("FILE_START from %s to %s: %s (%d bytes)", sender_id, recipient_id, payload["name"], payload["size"])
         
@@ -863,6 +787,8 @@ class UserFileTransferHandlers:
         Payload: {file_id, index, ciphertext, iv, tag, [wrapped_key]}
         Note: wrapped_key is REQUIRED for DM, omitted for public channel.
         """
+             # Envelop sent to another server need to be wrapped with msg type server deliver for delivering acrooss servers
+        server_deliver_envelope = await GenericRouters.envelope_wrapper_server_deliver(envelope) 
         # Validate sender
         sender_id = await GenericValidators.validate_sender(server, connection, envelope)
         if not sender_id:
@@ -886,12 +812,7 @@ class UserFileTransferHandlers:
         
         # Validate index is integer
         if not isinstance(payload["index"], int):
-            await server.send_error(
-                connection,
-                "BAD_PAYLOAD",
-                "index must be integer",
-                to_id=sender_id,
-            )
+            await connection.on_error_bad_key("index must be integer", to_id=sender_id)
             return
         
         # Determine mode from recipient
@@ -900,18 +821,13 @@ class UserFileTransferHandlers:
         if is_uuid_v4(recipient_id):
             # DM mode - wrapped_key REQUIRED per SOCP §9.4
             if "wrapped_key" not in payload:
-                await server.send_error(
-                    connection,
-                    "BAD_PAYLOAD",
-                    "wrapped_key required for DM file transfer",
-                    to_id=sender_id,
-                )
+                await connection.on_error_bad_key("wrapped_key required for DM file transfer", to_id=sender_id)
                 return
             
-            # FILE_CHUNK is forwarded as-is (same envelope for both local and remote)
+            # FILE_CHUNK is forwarded (wrapped for remote delivery)
             await DMRecipientRouter(server, connection, sender_id, recipient_id) \
                 .envelope_to_local(envelope) \
-                .envelope_to_another_server(envelope) \
+                .envelope_to_another_server(server_deliver_envelope) \
                 .run()
             logger.debug("FILE_CHUNK from %s to %s: chunk %d", sender_id, recipient_id, payload["index"])
         
@@ -928,12 +844,7 @@ class UserFileTransferHandlers:
             logger.debug("FILE_CHUNK from %s to public: chunk %d", sender_id, payload["index"])
         
         else:
-            await server.send_error(
-                connection,
-                "BAD_RECIPIENT",
-                f"Invalid recipient: {recipient_id}",
-                to_id=sender_id,
-            )
+            await connection.on_error_user_not_found(f"Invalid recipient: {recipient_id}", to_id=sender_id)
     
     @staticmethod
     async def handle_file_end(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
@@ -942,6 +853,8 @@ class UserFileTransferHandlers:
         
         Payload: {file_id}
         """
+        # Envelop sent to another server need to be wrapped with msg type server deliver for delivering acrooss servers
+        server_deliver_envelope = await GenericRouters.envelope_wrapper_server_deliver(envelope) 
         # Validate sender
         sender_id = await GenericValidators.validate_sender(server, connection, envelope)
         if not sender_id:
@@ -960,10 +873,10 @@ class UserFileTransferHandlers:
         recipient_id = envelope.to
         
         if is_uuid_v4(recipient_id):
-            # DM mode - FILE_END is forwarded as-is (same envelope for both local and remote)
+            # DM mode - FILE_END is forwarded (wrapped for remote delivery)
             await DMRecipientRouter(server, connection, sender_id, recipient_id) \
                 .envelope_to_local(envelope) \
-                .envelope_to_another_server(envelope) \
+                .envelope_to_another_server(server_deliver_envelope) \
                 .run()
             logger.info("FILE_END from %s to %s: file_id=%s", sender_id, recipient_id, file_id)
         
@@ -980,54 +893,7 @@ class UserFileTransferHandlers:
             logger.info("FILE_END from %s to public: file_id=%s", sender_id, file_id)
         
         else:
-            await server.send_error(
-                connection,
-                "BAD_RECIPIENT",
-                f"Invalid recipient: {recipient_id}",
-                to_id=sender_id,
-            )
-
-
-class ServerFileTransferHandlers:
-    """
-    Server-relayed file transfer handlers per SOCP §9.4.
-    Pure relay - no authorization or validation, just routing.
-    """
-    @staticmethod
-    async def handle_file_generic_relay(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope, message_type: MessageType) -> None:
-        """Handle generic relay - initiate file transfer with manifest."""
-        recipient_id = envelope.to
-        
-        if is_uuid_v4(recipient_id):
-            # DM mode
-            await GenericRouters.relay_server_to_dm_recipient(
-                server,
-                envelope,
-                message_type,
-            )
-        elif recipient_id == "public" or recipient_id == "*":
-            # Public channel mode
-            await GenericRouters.relay_server_to_public_channel(
-                server,
-                envelope,
-                message_type,
-            )
-        else:
-            logger.warning("Invalid recipient %s in %s from %s", recipient_id, message_type, envelope.from_)
-            # DM mode
-    @staticmethod
-    async def handle_file_start_relay(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
-        """Relay FILE_START from another server to local users or next hop."""
-        await ServerFileTransferHandlers.handle_file_generic_relay(server, connection, envelope, MessageType.FILE_START)
-    
-    @staticmethod
-    async def handle_file_chunk_relay(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
-        """Relay FILE_CHUNK from another server to local users or next hop."""
-        await ServerFileTransferHandlers.handle_file_generic_relay(server, connection, envelope, MessageType.FILE_CHUNK)
-    @staticmethod
-    async def handle_file_end_relay(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
-        """Relay FILE_END from another server to local users or next hop."""
-        await ServerFileTransferHandlers.handle_file_generic_relay(server, connection, envelope, MessageType.FILE_END)
+            await connection.on_error_user_not_found(f"Invalid recipient: {recipient_id}", to_id=sender_id)
 
 
 # Handler registry mapping message types to their handlers
@@ -1036,15 +902,15 @@ SERVER_HANDLER_REGISTRY: Dict[MessageType, MessageHandler] = {
     MessageType.SERVER_ANNOUNCE: ServerMessageHandlers.handle_server_announce,
     MessageType.USER_ADVERTISE: ServerMessageHandlers.handle_presence_gossip,
     MessageType.USER_REMOVE: ServerMessageHandlers.handle_presence_gossip,
-    MessageType.SERVER_DELIVER: ServerMessageHandlers.handle_server_deliver,
+    MessageType.SERVER_DELIVER: ServerMessageHandlers.handle_generic_server_deliver,
     MessageType.PUBLIC_CHANNEL_ADD: ServerMessageHandlers.handle_public_channel_add,
     MessageType.PUBLIC_CHANNEL_UPDATED: ServerMessageHandlers.handle_public_channel_updated,
     MessageType.PUBLIC_CHANNEL_KEY_SHARE: ServerMessageHandlers.handle_public_channel_key_share,
-    MessageType.MSG_PUBLIC_CHANNEL: ServerMessageHandlers.handle_msg_public_channel_server,
+    MessageType.MSG_PUBLIC_CHANNEL: ServerMessageHandlers.handle_generic_server_deliver,
     # File transfer (server-relayed)
-    MessageType.FILE_START: ServerFileTransferHandlers.handle_file_start_relay,
-    MessageType.FILE_CHUNK: ServerFileTransferHandlers.handle_file_chunk_relay,
-    MessageType.FILE_END: ServerFileTransferHandlers.handle_file_end_relay,
+    MessageType.FILE_START: ServerMessageHandlers.handle_generic_server_deliver,
+    MessageType.FILE_CHUNK: ServerMessageHandlers.handle_generic_server_deliver,
+    MessageType.FILE_END: ServerMessageHandlers.handle_generic_server_deliver,
 }
 
 USER_HANDLER_REGISTRY: Dict[MessageType, MessageHandler] = {

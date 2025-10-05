@@ -14,6 +14,7 @@ import time
 import uuid
 from typing import Dict, NamedTuple, Optional, Set, Tuple, Any
 from server.core.MemoryTable import *
+from shared.crypto.crypto import rsassa_pss_verify
 from shared.crypto.keys import RSAKeypair, load_keypair, save_keypair
 
 from shared.crypto.signer import RSAServerTransportSigner
@@ -98,6 +99,12 @@ class SOCPServer:
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
         
+        # Track reconnection attempts per server (for exponential backoff)
+        self._reconnection_attempts: Dict[str, int] = {}
+
+        # Prevent concurrent reconnections to same server
+        self._reconnecting_servers: Set[str] = set()
+        
         # Duplicate suppression per SOCP §10
         self.message_cache = MessageDeduplicationCache(ttl=dedup_ttl)
         
@@ -167,7 +174,7 @@ class SOCPServer:
         """
         # NOT FINISHED SKETON ONLY
         
-        connection = ConnectionLink(websocket,self.signer)
+        connection = ConnectionLink(websocket, self.signer, self.local_server)
      
         remote_addr = websocket.remote_address
         logger.info(f"New connection from {remote_addr}")
@@ -186,12 +193,7 @@ class SOCPServer:
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
                     # Send error response if possible
-                    await self.send_error(
-                        connection,
-                        "UNKNOWN_TYPE",
-                        str(e),
-                        to_id=connection.server_id or connection.user_id,
-                    )
+                    await connection.on_error_unknown_type(str(e))
                     
         except websockets.exceptions.ConnectionClosed:
             logger.info(f"Connection {remote_addr} closed")
@@ -229,9 +231,9 @@ class SOCPServer:
         if envelope.sig is None:
             logger.warning("Missing signature on message %s from %s", envelope.type, server_id)
             return False
-
+        siner = RSAServerTransportSigner(self.keypair)
         try:
-            ok = self.signer.verify(envelope.payload, envelope.sig)
+            ok = rsassa_pss_verify(pubkey_b64url, json.dumps(envelope.payload, separators=(',', ':'), sort_keys=True).encode(), envelope.sig)
             if not ok:
                 logger.warning("Transport signature verification failed for %s from %s", envelope.type, server_id)
             return ok
@@ -351,7 +353,7 @@ class SOCPServer:
             url = f"ws://{host}:{port}"
             try:
                 async with websockets.connect(url) as ws:
-                    link = ConnectionLink(ws,self.signer, connection_type="server")
+                    link = ConnectionLink(ws, self.signer, self.local_server, connection_type="server")
                     # Send SERVER_HELLO_JOIN to introducer (to=host:port per spec)
                     join_env = create_envelope(
                         MessageType.SERVER_HELLO_JOIN.value,
@@ -464,7 +466,7 @@ class SOCPServer:
                 url = f"ws://{h}:{p}"
                 logger.info(f"Connecting to server {server_id} at {h}:{p}")
                 ws = await websockets.connect(url)
-                link = ConnectionLink(ws,self.signer, connection_type="server")
+                link = ConnectionLink(ws, self.signer, self.local_server, connection_type="server")
                 link.server_id = server_id
                 link.identified = True
               
@@ -566,20 +568,20 @@ class SOCPServer:
 
         # Defensive: ensure UUIDv4 (Envelope validator should have enforced already)
         if not is_uuid_v4(user_id):
-            await self.send_error(connection, "BAD_KEY", "from must be UUIDv4", to_id=envelope.from_)
+            await connection.on_error_bad_key("from must be UUIDv4", to_id=envelope.from_)
             return
         
         # Validate user_id is not already in use locally
         if user_id in self.connected_users:
             logger.warning(f"User ID {user_id} already in use")
-            await self.send_error(connection, "NAME_IN_USE", f"User {user_id} already connected", to_id=user_id)
+            await connection.on_error_name_in_use(f"User {user_id} already connected", to_id=user_id)
             return
         
         # Validate payload structure
         required_fields = {"client", "pubkey", "enc_pubkey"}
         if not all(field in envelope.payload for field in required_fields):
             missing = required_fields - set(envelope.payload.keys())
-            await self.send_error(connection, "BAD_KEY", f"Missing required fields: {missing}", to_id=user_id)
+            await connection.on_error_bad_key(f"Missing required fields: {missing}", to_id=user_id)
             return
         
         # Register the user
@@ -659,7 +661,7 @@ class SOCPServer:
         required_fields = {"host", "port", "pubkey"}
         if not all(field in envelope.payload for field in required_fields):
             missing = required_fields - set(envelope.payload.keys())
-            await self.send_error(connection, "BAD_KEY", f"Missing required fields: {missing}", to_id=envelope.from_)
+            await connection.on_error_bad_key(f"Missing required fields: {missing}", to_id=envelope.from_)
             return
 
         # Assign server ID ensuring uniqueness as per spec
@@ -711,7 +713,7 @@ class SOCPServer:
         required_fields = {"host", "port", "pubkey"}
         if not all(field in envelope.payload for field in required_fields):
             missing = required_fields - set(envelope.payload.keys())
-            await self.send_error(connection, "BAD_KEY", f"Missing required fields: {missing}", to_id=envelope.from_)
+            await connection.on_error_bad_key(f"Missing required fields: {missing}", to_id=envelope.from_)
             return
         # Register/replace link
         connection.connection_type = "server"
@@ -740,12 +742,7 @@ class SOCPServer:
                 
         except Exception as e:
             logger.error(f"Error processing message: {e}")
-            await self.send_error(
-                connection,
-                "UNKNOWN_TYPE",
-                str(e),
-                to_id=connection.server_id or connection.user_id,
-            )
+            await connection.on_error_unknown_type(str(e))
     
     async def handle_user_message(self, connection: ConnectionLink, envelope: Envelope) -> None:
         """
@@ -756,12 +753,7 @@ class SOCPServer:
         # Validate and parse message type
         if not MessageType.is_valid(envelope.type):
             logger.warning("Unknown user message type: %s", envelope.type)
-            await self.send_error(
-                connection,
-                "UNKNOWN_TYPE",
-                f"Unknown message type: {envelope.type}",
-                to_id=connection.user_id,
-            )
+            await connection.on_error_unknown_type(f"Unknown message type: {envelope.type}")
             return
         
         msg_type = MessageType(envelope.type)
@@ -770,12 +762,7 @@ class SOCPServer:
         handler = USER_HANDLER_REGISTRY.get(msg_type)
         if handler is None:
             logger.warning("Unimplemented user message type: %s", msg_type.value)
-            await self.send_error(
-                connection,
-                "UNSUPPORTED",
-                f"Message type {msg_type.value} not yet implemented",
-                to_id=connection.user_id,
-            )
+            await connection.on_error_unknown_type(f"Message type {msg_type.value} not yet implemented")
             return
         
         # Dispatch to handler
@@ -783,12 +770,7 @@ class SOCPServer:
             await handler(self, connection, envelope)
         except Exception as exc:
             logger.error("Error handling user message %s: %s", msg_type.value, exc, exc_info=True)
-            await self.send_error(
-                connection,
-                "INTERNAL_ERROR",
-                f"Failed to process {msg_type.value}",
-                to_id=connection.user_id,
-            )
+            await connection.on_error_bad_key(f"Failed to process {msg_type.value}")
     
     async def handle_server_message(self, connection: ConnectionLink, envelope: Envelope) -> None:
         """
@@ -807,12 +789,7 @@ class SOCPServer:
         # Validate and parse message type
         if not MessageType.is_valid(envelope.type):
             logger.warning("Unknown server message type: %s", envelope.type)
-            await self.send_error(
-                connection,
-                "UNKNOWN_TYPE",
-                f"Unknown message type: {envelope.type}",
-                to_id=origin_server_id,
-            )
+            await connection.on_error_unknown_type(f"Unknown message type: {envelope.type}", to_id=origin_server_id)
             return
         
         msg_type = MessageType(envelope.type)
@@ -821,11 +798,8 @@ class SOCPServer:
         handler = SERVER_HANDLER_REGISTRY.get(msg_type)
         if handler is None:
             logger.warning("Unimplemented server message type: %s", msg_type.value)
-            await self.send_error(
-                connection,
-                "UNSUPPORTED",
-                f"Message type {msg_type.value} not yet implemented",
-                to_id=origin_server_id,
+            await connection.on_error_unknown_type(
+                f"Message type {msg_type.value} not yet implemented", to_id=origin_server_id
             )
             return
         
@@ -834,12 +808,7 @@ class SOCPServer:
             await handler(self, connection, envelope)
         except Exception as exc:
             logger.error("Error handling server message %s: %s", msg_type.value, exc, exc_info=True)
-            await self.send_error(
-                connection,
-                "INTERNAL_ERROR",
-                f"Failed to process {msg_type.value}",
-                to_id=origin_server_id,
-            )
+            await connection.on_error_bad_key(f"Failed to process {msg_type.value}", to_id=origin_server_id)
     
     async def broadcast_user_advertise(self, user_id: str, meta: Dict[str, Any]) -> None:
         """Broadcast USER_ADVERTISE to all connected servers"""
@@ -948,7 +917,6 @@ class SOCPServer:
         return {
             "server_id": self.local_server.id,
             "local_users": list(self.users.keys()),
-            # TODO: Check for compliance with SOCP spec
             "known_servers": {sid: (rec.endpoint.host, rec.endpoint.port) for sid, rec in self.servers.items()},
             "server_links": server_links,
             "heartbeat_interval": self.heartbeat_interval,
@@ -958,27 +926,7 @@ class SOCPServer:
         }
 
 
-    async def send_error(
-        self,
-        connection: ConnectionLink,
-        error_code: str,
-        detail: str,
-        *,
-        to_id: Optional[str] = None,
-    ) -> None:
-        """Send ERROR message to connection"""
-        target = to_id or connection.user_id or connection.server_id
-        if not target:
-            logger.warning("Cannot send ERROR %s: no recipient", error_code)
-            return
-        payload = {"code": error_code, "detail": detail}
-        envelope = create_envelope(
-            MessageType.ERROR.value,
-            self.local_server.id,
-            target,
-            payload,
-        )
-        await connection.send_message(envelope)
+
     
     async def cleanup_connection(
         self,
@@ -1018,26 +966,124 @@ class SOCPServer:
         logger.info(f"Cleaned up user {user_id}")
     
     async def cleanup_server_connection(self, server_id: str) -> None:
-        """Clean up server connection"""
-        if server_id in self.servers:
-            del self.servers[server_id]
-            
+        """Clean up server connection and schedule reconnection"""
         # Remove any user_locations that point to this server as host
-        stale_users = [user_id for user_id, record in self.users.items() if getattr(record, "location", None) == server_id]
+        stale_users = [user_id for user_id, record in self.users.items() if record.location == server_id]
         for u in stale_users:
-            #del self.user_locations[u]
-            #TODO: Check for compliance with SOCP spec
             del self.users[u]
-            
-        # TODO: Attempt reconnection after delay
         
-        logger.info(f"Cleaned up server {server_id}")
+        # Clear the link but keep server record (endpoint + pubkey) for reconnection
+        if server_id in self.servers:
+            server_record = self.servers[server_id]
+            # Update record to clear the link but preserve endpoint and pubkey
+            self.add_update_server(server_id, server_record.endpoint, None, server_record.pubkey)
+            
+            # Schedule reconnection with exponential backoff (SOCP §11)
+            # Only schedule if we have server info to reconnect to
+            reconnect_task = asyncio.create_task(self._reconnect_to_server(server_id))
+            self._track_background_task(reconnect_task)
+            logger.info(f"Cleaned up server {server_id}, reconnection scheduled")
+        else:
+            logger.info(f"Cleaned up server {server_id}, no reconnection scheduled (not in registry)")
+    
+    async def _reconnect_to_server(self, server_id: str, max_attempts: int = 10) -> None:
+        """
+        Attempt to reconnect to a disconnected server with exponential backoff.
+
+        Per SOCP §11: "try reconnecting (using server_addrs)"
+
+        Args:
+            server_id: The server to reconnect to
+            max_attempts: Maximum number of reconnection attempts (default: 10)
+        """
+        # Prevent concurrent reconnections to the same server
+        if server_id in self._reconnecting_servers:
+            logger.debug(f"Already reconnecting to server {server_id}, skipping duplicate attempt")
+            return
+
+        self._reconnecting_servers.add(server_id)
+        try:
+            attempt = self._reconnection_attempts.get(server_id, 0)
+
+            while attempt < max_attempts:
+                # Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, max 60s
+                delay = min(2 ** attempt, 60)
+                logger.info(f"Reconnecting to server {server_id} in {delay}s (attempt {attempt + 1}/{max_attempts})")
+
+                await asyncio.sleep(delay)
+
+                # Check if server still exists and is disconnected
+                server_record = self.servers.get(server_id)
+                if not server_record:
+                    logger.debug(f"Server {server_id} no longer in registry, stopping reconnection")
+                    self._reconnection_attempts.pop(server_id, None)
+                    return
+
+                if server_record.link is not None:
+                    logger.info(f"Server {server_id} already reconnected, stopping reconnection attempts")
+                    self._reconnection_attempts.pop(server_id, None)
+                    return
+
+                # Attempt connection
+                try:
+                    h = server_record.endpoint.host
+                    p = server_record.endpoint.port
+                    url = f"ws://{h}:{p}"
+
+                    logger.info(f"Attempting to reconnect to server {server_id} at {h}:{p}")
+                    ws = await websockets.connect(url)
+                    link = ConnectionLink(ws, self.signer, self.local_server, connection_type="server")
+                    link.server_id = server_id
+                    link.identified = True
+                    link.last_seen = time.monotonic()
+
+                    # Identify ourselves with SERVER_HELLO_LINK
+                    link_env = create_envelope(
+                        MessageType.SERVER_HELLO_LINK.value,
+                        self.local_server.id,
+                        server_id,
+                        {
+                            "host": self.local_server.endpoint.host,
+                            "port": self.local_server.endpoint.port,
+                            "pubkey": self.local_server.pubkey
+                        },
+                    )
+                    await link.send_message(link_env)
+
+                    # Optional: await welcome response
+                    with suppress(asyncio.TimeoutError):
+                        initial = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                        link.last_seen = time.monotonic()
+                        if isinstance(initial, bytes):
+                            initial = initial.decode("utf-8")
+                        await self.process_message(link, initial)
+
+                    # Register link and start reader task
+                    self.add_update_server(server_id, server_record.endpoint, link, server_record.pubkey)
+                    reader = asyncio.create_task(self._run_server_link(link))
+                    self._track_background_task(reader)
+
+                    logger.info(f"Successfully reconnected to server {server_id} at {h}:{p}")
+
+                    # Reset reconnection attempts on success
+                    self._reconnection_attempts.pop(server_id, None)
+                    return
+
+                except Exception as e:
+                    attempt += 1
+                    self._reconnection_attempts[server_id] = attempt
+                    logger.warning(f"Reconnection attempt {attempt} to {server_id} failed: {e}")
+
+            logger.error(f"Failed to reconnect to server {server_id} after {max_attempts} attempts")
+            self._reconnection_attempts.pop(server_id, None)
+        finally:
+            # Always remove from reconnecting set when done (success or failure)
+            self._reconnecting_servers.discard(server_id)
 
 
 async def main():
     """Main entry point"""
-
-    server = SOCPServer(storage_path=Path("~/.server"), host="localhost", port=8765)
+    server = SOCPServer(storage_path=Path("~/.server").expanduser(), host="localhost", port=8765)
     await server.start_server()
 if __name__ == "__main__":
     asyncio.run(main())

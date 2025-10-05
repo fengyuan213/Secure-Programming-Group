@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+from shared.envelope import Envelope
+from shared.utils import is_uuid_v4
 '''
 All type annotations in that file are stored as strings internally.
 
@@ -25,6 +28,13 @@ class ServerRecord:
     link: ConnectionLink | None
     endpoint: ServerEndpoint
     pubkey: str
+    def is_connected(self) -> bool:
+        return self.link is not None
+    async def send_message(self, envelope: Envelope) -> None:
+        if self.link is None:
+            raise ValueError("Server is not connected")
+        await self.link.send_message(envelope)
+
 
 @dataclass
 class UserRecord:
@@ -32,6 +42,16 @@ class UserRecord:
     link: Optional[ConnectionLink]   # None if remote
     location: Location                 # "local" or server_id  # pyright: ignore[reportInvalidTypeForm]
 
+    def is_local(self) -> bool:
+        return self.location == "local"
+    def is_remote(self) -> bool:
+        return self.location != "local" and is_uuid_v4(self.location)
+    def is_connected(self) -> bool:
+        return self.link is not None
+    async def send_message(self, envelope: Envelope) -> None:
+        if self.link is None:
+            raise ValueError("User is not connected")
+        await self.link.send_message(envelope)
     # Helper for convenience (doesn't store object refs)
     def resolve_server(self, servers: Dict[str, ServerRecord]) -> Optional[ServerRecord]:
         if self.location == "local":
