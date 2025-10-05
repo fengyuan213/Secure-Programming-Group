@@ -11,6 +11,12 @@ logs/
 **/.DS_Store
 # C extensions
 *.so
+# test files
+.server/
+.server2/
+.server3/
+state.json
+ 
 .socp/
 # Distribution / packaging
 .Python

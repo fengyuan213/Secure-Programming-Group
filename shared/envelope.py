@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional, Set, Tuple
 import json
 import time
 
-from shared.utils import is_uuid_v4, is_base64url, is_ipv4_hostport
+from shared.utils import is_uuid_v4, is_base64url, is_ipv4_hostport, is_hostport
 
 # message types where 'sig' MAY be omitted (first-contact flows) when update this, update connectionlink.py as well
 _ALLOW_UNSIGNED_TYPES: Set[str] = {
@@ -148,7 +148,7 @@ def _validate_to_field(to_field: str, msg_type: str) -> bool:
         return True
     if to_field == "public":  # Public channel (for MSG_PUBLIC_CHANNEL, FILE_* to public channel)
         return True
-    if msg_type == "SERVER_HELLO_JOIN" and is_ipv4_hostport(to_field):  # Bootstrap only
+    if msg_type == "SERVER_HELLO_JOIN" and is_hostport(to_field):  # Bootstrap only (accepts hostnames and IPs)
         return True
     
     # Regular case: must be UUID v4

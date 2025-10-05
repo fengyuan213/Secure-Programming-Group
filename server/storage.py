@@ -16,10 +16,13 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Dict, Any, Optional, Set
-from dataclasses import asdict
+from typing import Dict, Any, Optional, TYPE_CHECKING
 
 from shared.log import get_logger
+
+if TYPE_CHECKING:
+    from server.core.MemoryTable import ServerRecord, UserRecord
+    from server.core.PublicChannelManager import PublicChannelState
 
 logger = get_logger(__name__)
 

@@ -54,6 +54,29 @@ def is_ipv4_hostport(s: str) -> bool:
     except Exception:
         return False
 
+def is_hostport(s: str) -> bool:
+    """
+    Accepts 'hostname:port' or 'A.B.C.D:port'.
+    
+    For SERVER_HELLO_JOIN bootstrap where remote server ID is unknown.
+    Validates that:
+    - String contains exactly one colon
+    - Port is a valid integer between 1 and 65535
+    - Hostname is non-empty
+    
+    Examples: "localhost:8765", "192.168.1.5:8080", "example.com:443"
+    """
+    try:
+        if ':' not in s:
+            return False
+        host, port_s = s.rsplit(':', 1)  # rsplit to handle IPv6 future-proofing
+        if not host:  # Empty hostname
+            return False
+        port = int(port_s)
+        return 0 < port <= 65535
+    except Exception:
+        return False
+
 
 # ========================================
 #           SECTION NAME 
