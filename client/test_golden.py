@@ -9,8 +9,8 @@ import json
 import time
 from pathlib import Path
 
-from .keys import RSAKeypair
-from .crypto import rsa_oaep_encrypt, rsassa_pss_sign, rsassa_pss_verify, rsa_oaep_decrypt
+from shared.crypto.keys import RSAKeypair
+from shared.crypto.crypto import rsa_oaep_encrypt, rsassa_pss_sign, rsassa_pss_verify, rsa_oaep_decrypt
 from shared.envelope import create_envelope
 
 

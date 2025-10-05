@@ -27,7 +27,7 @@ from server.core.MessageHandlers import SERVER_HANDLER_REGISTRY, USER_HANDLER_RE
 from server.core.PublicChannelManager import PublicChannelManager
 from shared.envelope import Envelope, create_envelope
 from shared.utils import is_uuid_v4
-from shared.log import get_logger
+from shared.log import configure_root_logging, get_logger
 
 # Confiure Logging
 logger = get_logger(__name__)
@@ -122,7 +122,7 @@ class SOCPServer:
         self.add_update_server(persisted_id, ServerEndpoint(host=host, port=port), None, self.keypair.public_b64url())
         
         self.local_server = ServerRecord(id=persisted_id, link=None, endpoint=ServerEndpoint(host=host, port=port), pubkey=self.keypair.public_b64url())
-        
+       
         logger.info(f"Initialized SOCP Server with ID: {self.local_server.id}")
 
     def _track_background_task(self, task: asyncio.Task) -> None:
@@ -231,7 +231,6 @@ class SOCPServer:
         if envelope.sig is None:
             logger.warning("Missing signature on message %s from %s", envelope.type, server_id)
             return False
-        siner = RSAServerTransportSigner(self.keypair)
         try:
             ok = rsassa_pss_verify(pubkey_b64url, json.dumps(envelope.payload, separators=(',', ':'), sort_keys=True).encode(), envelope.sig)
             if not ok:
@@ -596,49 +595,55 @@ class SOCPServer:
         
         # Add user to public channel per SOCP §9.3
         user_pubkey = envelope.payload.get("enc_pubkey", envelope.payload.get("pubkey"))
+        logger.debug(f"User {user_id} connected with client {envelope.payload['client']} and pubkey {user_pubkey[:10] if user_pubkey else 'None'}...")
         if user_pubkey:
             try:
-                member = self.public_channel.add_member(user_id, user_pubkey)
-                
-                # Send channel info to user first
-                channel_info = self.public_channel.get_channel_info()
-                info_env = create_envelope(
-                    MessageType.PUBLIC_CHANNEL_ADD.value,
-                    self.local_server.id,
-                    user_id,
-                    {
-                        "group_id": channel_info["group_id"],
-                        "version": channel_info["version"],
-                        "meta": channel_info["meta"],
-                    },
-                )
-                await connection.send_message(info_env)
-                
-                # Send wrapped channel key to the user
-                key_share_env = create_envelope(
-                    MessageType.PUBLIC_CHANNEL_KEY_SHARE.value,
-                    self.local_server.id,
-                    user_id,
-                    {
-                        "wrapped_public_channel_key": member.wrapped_key,
-                        "creator_pub": self.keypair.public_b64url(),
-                        "content_sig": "",  # Optional for now
-                    },
-                )
-                await connection.send_message(key_share_env)
-                logger.info(f"Sent public channel info and key to user {user_id}")
+                self.public_channel.add_member(user_id, user_pubkey)
                 
                 # Broadcast PUBLIC_CHANNEL_ADD to network per SOCP §9.3
+                # Per spec: "to":"*" broadcast only, no direct messages
                 await self.broadcast_public_channel_add([user_id])
                 
                 # Broadcast PUBLIC_CHANNEL_UPDATED with all wraps per SOCP §9.3
+                # Per spec: "to":"*" broadcast only, users extract their own wrap
                 await self.broadcast_public_channel_updated()
                 
             except Exception as e:
                 logger.error(f"Failed to add user {user_id} to public channel: {e}")
         
-        # Broadcast USER_ADVERTISE to all servers
-        await self.broadcast_user_advertise(user_id, envelope.payload.get("meta", {}))
+        # Send existing users to new client (catch-up per SOCP §8.2)
+        catchup_count = 0
+        for existing_user_id, user_record in self.users.items():
+            if existing_user_id != user_id:  # Don't send self
+                # Get existing user's pubkey from public channel
+                existing_pubkey = ""
+                if hasattr(self, 'public_channel'):
+                    member = self.public_channel.get_member(existing_user_id)
+                    if member:
+                        existing_pubkey = member.user_pubkey
+                
+                # Send USER_ADVERTISE for each existing user directly to new client
+                catchup_env = create_envelope(
+                    MessageType.USER_ADVERTISE.value,
+                    self.local_server.id,
+                    user_id,  # To the new user only
+                    {
+                        "user_id": existing_user_id,
+                        "server_id": user_record.location,
+                        "meta": {"pubkey": existing_pubkey} if existing_pubkey else {}
+                    },
+                )
+                await connection.send_message(catchup_env)
+                catchup_count += 1
+        
+        if catchup_count > 0:
+            logger.info(f"Sent {catchup_count} existing users to new user {user_id[:8]}")
+        
+        # Broadcast USER_ADVERTISE for new user to all servers and clients
+        # Include pubkey in meta per SOCP §8.2
+        meta_with_pubkey = envelope.payload.get("meta", {}).copy()
+        meta_with_pubkey["pubkey"] = user_pubkey if user_pubkey else ""
+        await self.broadcast_user_advertise(user_id, meta_with_pubkey)
     
     async def handle_server_hello_join(self, connection: ConnectionLink, envelope: Envelope) -> None:
         """
@@ -810,6 +815,29 @@ class SOCPServer:
             logger.error("Error handling server message %s: %s", msg_type.value, exc, exc_info=True)
             await connection.on_error_bad_key(f"Failed to process {msg_type.value}", to_id=origin_server_id)
     
+    async def _relay_broadcast_to_network(self, envelope: Envelope, exclude_server: Optional[str] = None) -> None:
+        """
+        Helper to relay a broadcast message to all servers and local clients.
+        
+        Args:
+            envelope: The envelope to broadcast
+            exclude_server: Optional server_id to exclude from forwarding (for gossip loop prevention)
+        """
+        # Send to all connected servers (with optional exclusion)
+        for server_link in self.all_server_connection_links:
+            if exclude_server and server_link.server_id == exclude_server:
+                continue
+            await server_link.send_message(envelope)
+        
+        # Relay to all local clients per SOCP §8.2: "which relays to all clients"
+        for user_record in self.connected_local_users.values():
+            if user_record.link is not None:
+                await user_record.send_message(envelope)
+        
+        logger.debug(
+            f"Relayed {envelope.type} to network (excluded server: {exclude_server})"
+        )
+    
     async def broadcast_user_advertise(self, user_id: str, meta: Dict[str, Any]) -> None:
         """Broadcast USER_ADVERTISE to all connected servers"""
         payload = {
@@ -823,11 +851,7 @@ class SOCPServer:
             "*",
             payload,
         )
-        
-        # Send to all connected servers
-        for server_link in self.all_server_connection_links:
-            await server_link.send_message(envelope)
-        
+        await self._relay_broadcast_to_network(envelope)
         logger.info(f"Broadcasted USER_ADVERTISE for {user_id}")
     
     async def broadcast_public_channel_add(self, user_ids: list[str]) -> None:
@@ -845,20 +869,16 @@ class SOCPServer:
             "*",
             payload,
         )
-        
-        # Send to all connected servers
-        for server_link in self.all_server_connection_links:
-            await server_link.send_message(envelope)
-        
+        await self._relay_broadcast_to_network(envelope)
         logger.info(f"Broadcasted PUBLIC_CHANNEL_ADD for {len(user_ids)} users")
     
     async def broadcast_public_channel_updated(self) -> None:
-        """Broadcast PUBLIC_CHANNEL_UPDATED with current version and all wraps per SOCP §9.3"""
-        wraps = self.public_channel.channel.get_wrapped_keys_list()
+        """Broadcast PUBLIC_CHANNEL_UPDATED with current version and member list per SOCP §9.3"""
+        members = self.public_channel.channel.get_member_info_list()
         
         payload = {
             "version": self.public_channel.channel.version,
-            "wraps": wraps,
+            "members": members,
         }
         envelope = create_envelope(
             MessageType.PUBLIC_CHANNEL_UPDATED.value,
@@ -866,13 +886,9 @@ class SOCPServer:
             "*",
             payload,
         )
-        
-        # Send to all connected servers
-        for server_link in self.all_server_connection_links:
-            await server_link.send_message(envelope)
-        
+        await self._relay_broadcast_to_network(envelope)
         logger.info(
-            f"Broadcasted PUBLIC_CHANNEL_UPDATED version={self.public_channel.channel.version} with {len(wraps)} wraps"
+            f"Broadcasted PUBLIC_CHANNEL_UPDATED version={self.public_channel.channel.version} with {len(members)} members"
         )
     
     async def broadcast_server_announce(self, server_id: str, server_info: Dict[str, Any]) -> None:
@@ -959,10 +975,7 @@ class SOCPServer:
             "*",
             payload,
         )
-        
-        for server_link in self.all_server_connection_links:
-            await server_link.send_message(envelope)
-        
+        await self._relay_broadcast_to_network(envelope)
         logger.info(f"Cleaned up user {user_id}")
     
     async def cleanup_server_connection(self, server_id: str) -> None:
@@ -1083,6 +1096,7 @@ class SOCPServer:
 
 async def main():
     """Main entry point"""
+    configure_root_logging()
     server = SOCPServer(storage_path=Path("~/.server").expanduser(), host="localhost", port=8765)
     await server.start_server()
 if __name__ == "__main__":

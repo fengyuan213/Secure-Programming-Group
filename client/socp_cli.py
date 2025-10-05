@@ -12,9 +12,9 @@ from typing import Optional
 import typer
 from rich.console import Console
 from rich.table import Table
+from aioconsole import ainput
 
 from shared.envelope import create_envelope
-from shared.log import get_logger
 from shared.crypto.keys import RSAKeypair, load_keypair, save_keypair
 from .state import Presence
 from client.pubdir import PubKeyDirectory
@@ -23,7 +23,7 @@ from .ws_client import ClientSession
 
 app = typer.Typer(help="SOCP v1.3 Client CLI")
 console = Console()
-logger = get_logger(__name__)
+
 
 
 def _default_server() -> str:
@@ -91,6 +91,9 @@ def run(
                 uid2 = env.payload.get("user_id")
                 meta = env.payload.get("meta", {})
                 presence.add(uid2, meta)
+                # Auto-store pubkey if present in meta per SOCP §8.2
+                if "pubkey" in meta and meta["pubkey"]:
+                    PubKeyDirectory().set(uid2, meta["pubkey"])
             elif env.type == "USER_REMOVE":
                 uid2 = env.payload.get("user_id")
                 presence.remove(uid2)
@@ -196,12 +199,12 @@ def run(
                 console.print(f"[dim]ACK {env.payload.get('msg_ref')}[/]")
             else:
                 console.print(f"[dim]recv {env.type}[/]")
-
+        console.print("Connected to server")
         recv_task = asyncio.create_task(session.recv_loop(default_handler))
 
         try:
             while True:
-                line = input(": ").strip()
+                line = (await ainput(": ")).strip()
                 if not line:
                     continue
                 if line in {"/quit", "/exit"}:
@@ -320,6 +323,7 @@ def run(
 
 
 if __name__ == "__main__":
+    
     app()
 
 

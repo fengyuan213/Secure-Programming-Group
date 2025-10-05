@@ -90,7 +90,7 @@ class ConnectionLink:
                 envelope.sig = self.singer.sign(envelope.payload)
             json_str = envelope.to_json()
             await self.websocket.send(json_str)
-            logger.debug(f"Sent message {envelope.type} to {self.connection_type}")
+            logger.debug(f"Sent message {envelope.type} to {self.connection_type} to {envelope.to}")
         except websockets.exceptions.ConnectionClosed:
             logger.warning(f"Connection closed while sending {envelope.type}")
         except Exception as e:

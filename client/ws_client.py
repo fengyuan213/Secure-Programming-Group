@@ -20,7 +20,7 @@ MessageHandler = Callable[[Envelope], Awaitable[None]]
 class ClientSession:
     user_id: str
     server_ws_url: str
-    websocket: Optional[websockets.WebSocketClientProtocol] = None
+    websocket: Optional[websockets.ClientConnection] = None
     handlers: Dict[str, MessageHandler] = None
 
     async def connect(self) -> None:

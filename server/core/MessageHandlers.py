@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from os import name
 from typing import TYPE_CHECKING, Callable, Awaitable, Dict, Set, Any, Optional
 
-from server.core.MemoryTable import ServerRecord, UserRecord
+from server.core.MemoryTable import UserRecord
 from server.core.MessageTypes import MessageType
 from shared.envelope import Envelope, create_envelope
 from shared.utils import is_uuid_v4
@@ -172,7 +171,7 @@ class GenericRouters:
                     deliver_env = create_envelope(
                         message_type,
                         sender_id,
-                        "public",
+                        "*",
                         payload,
                     )
                     await local_link.send_message(deliver_env)
@@ -337,17 +336,9 @@ class ServerMessageHandlers:
             if getattr(rec, "location", None) == server_id:
                 del server.users[user_id]
         
-        # Gossip to other connected servers
-        for link in server.all_server_connection_links:
-            if link is connection or (link.server_id and link.server_id == origin_server_id):
-                continue
-            logger.debug(
-                "Forwarding %s for %s to server %s",
-                msg_type,
-                user_id,
-                link.server_id,
-            )
-            await link.send_message(envelope)
+        # Forward to other servers and relay to local clients (exclude origin to prevent loops)
+        await server._relay_broadcast_to_network(envelope, exclude_server=origin_server_id)
+        logger.debug(f"Relayed {msg_type} for {user_id} to network")
     @staticmethod
     async def server_deliver_dm_message(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
         """Handle SERVER_DELIVER - route message to local or remote user."""
@@ -445,7 +436,11 @@ class ServerMessageHandlers:
 
     @staticmethod
     async def handle_public_channel_add(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
-        """Handle PUBLIC_CHANNEL_ADD - notification that users joined the channel."""
+        """
+        Handle PUBLIC_CHANNEL_ADD - notification that users joined the channel.
+        
+        Tracks remote users in the public channel (without their pubkeys, which we don't have).
+        """
         origin_server_id = envelope.from_
         payload = envelope.payload
         
@@ -465,6 +460,19 @@ class ServerMessageHandlers:
             logger.warning("Malformed PUBLIC_CHANNEL_ADD from %s", origin_server_id)
             return
         
+        # Track remote users in our public channel (without pubkeys, which we don't have)
+        # This allows us to maintain an awareness of all channel members
+        if hasattr(server, 'public_channel'):
+            for user_id in added_users:
+                if isinstance(user_id, str) and user_id not in server.public_channel.get_members():
+                    # Add as remote member with empty pubkey (we don't have it)
+                    # In RSA-only mode, this is mainly for presence tracking
+                    try:
+                        server.public_channel.add_member(user_id, "")  # Empty pubkey for remote users
+                        logger.debug("Tracked remote user %s in public channel", user_id)
+                    except Exception as e:
+                        logger.debug("Could not track remote user %s: %s", user_id, e)
+        
         logger.info(
             "PUBLIC_CHANNEL_ADD from %s: %d users added (if_version=%s)",
             origin_server_id,
@@ -472,11 +480,8 @@ class ServerMessageHandlers:
             if_version,
         )
         
-        # Forward to other servers
-        for link in server.all_server_connection_links:
-            if link is connection or (link.server_id and link.server_id == origin_server_id):
-                continue
-            await link.send_message(envelope)
+        # Forward to other servers and relay to local clients (exclude origin to prevent loops)
+        await server._relay_broadcast_to_network(envelope, exclude_server=origin_server_id)
     
     @staticmethod
     async def handle_public_channel_updated(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
@@ -507,40 +512,8 @@ class ServerMessageHandlers:
             len(wraps),
         )
         
-        # Distribute wraps to local users
-        for wrap in wraps:
-            if not isinstance(wrap, dict):
-                continue
-            
-            member_id = wrap.get("member_id")
-            wrapped_key = wrap.get("wrapped_key")
-            
-            if not (isinstance(member_id, str) and isinstance(wrapped_key, str)):
-                continue
-            
-            # Check if this member is local
-            user_rec = server.users.get(member_id)
-            if getattr(user_rec, "location", None) == "local":
-                local_link = getattr(user_rec, "link", None)
-                if local_link:
-                    # Send updated wrap to local user
-                    update_env = create_envelope(
-                        "PUBLIC_CHANNEL_UPDATED",
-                        server.local_server.id,
-                        member_id,
-                        {
-                            "version": version,
-                            "wrapped_key": wrapped_key,
-                        },
-                    )
-                    await local_link.send_message(update_env)
-                    logger.debug("Sent channel update to local user %s", member_id)
-        
-        # Forward to other servers
-        for link in server.all_server_connection_links:
-            if link is connection or (link.server_id and link.server_id == origin_server_id):
-                continue
-            await link.send_message(envelope)
+        # Forward to other servers and relay to local clients (exclude origin to prevent loops)
+        await server._relay_broadcast_to_network(envelope, exclude_server=origin_server_id)
     
     @staticmethod
     async def handle_public_channel_key_share(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
@@ -597,6 +570,9 @@ class ServerMessageHandlers:
             if link is connection or (link.server_id and link.server_id == origin_server_id):
                 continue
             await link.send_message(envelope)
+        # for user_record in server.connected_local_users.values():
+        #     if user_record.link is not None:
+        #         await user_record.send_message(envelope)
     
 
 
@@ -672,36 +648,88 @@ class UserMessageHandlers:
     
     @staticmethod
     async def handle_msg_public_channel(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
-        """Handle MSG_PUBLIC_CHANNEL - broadcast message to all channel members."""
-        # Validate sender
-        sender_id = await GenericValidators.validate_sender(server, connection, envelope)
-        if not sender_id:
-            return
+        """
+        Handle MSG_PUBLIC_CHANNEL per SOCP §9.3.
         
-        # Validate payload
+        From user: Broadcast to all servers + local members
+        From server: Deliver to local members only (prevents loops)
+        """
+        is_from_user = connection.connection_type == "user"
+        is_from_server = connection.connection_type == "server"
         payload = envelope.payload
+        
+        # === VALIDATION & AUTHORIZATION ===
+        
+        # Validate required fields
         required_fields = {"ciphertext", "sender_pub", "content_sig"}
-        if not await GenericValidators.validate_required_fields(
-            server, connection, payload, required_fields, sender_id
-        ):
+        if not all(field in payload for field in required_fields):
+            if is_from_user:
+                sender_id = await GenericValidators.validate_sender(server, connection, envelope)
+                if sender_id:
+                    await connection.on_error_bad_key("Missing required fields", to_id=sender_id)
+            else:
+                logger.warning("Malformed MSG_PUBLIC_CHANNEL: missing fields")
             return
         
-        # Prepare broadcast payload
-        broadcast_payload = {
-            "ciphertext": payload["ciphertext"],
-            "sender_pub": payload["sender_pub"],
-            "content_sig": payload["content_sig"],
-        }
+        # User origination: validate sender and authorization
+        if is_from_user:
+            sender_id = await GenericValidators.validate_sender(server, connection, envelope)
+            if not sender_id:
+                return
+            # Authorization: sender must be channel member
+            if sender_id not in server.public_channel.get_members():
+                await connection.on_error_bad_key("Not a member of public channel", to_id=sender_id)
+                return
         
-        # Use generic router for public channel broadcast
-        await GenericRouters.route_to_public_channel(
-            server,
-            connection,
-            sender_id,
-            broadcast_payload,
+        # Server relay: duplicate suppression
+        elif is_from_server:
+            if server.message_cache.check_and_mark(envelope):
+                logger.debug("Suppressed duplicate MSG_PUBLIC_CHANNEL")
+                return
+            sender_id = envelope.from_
+        
+        # === ROUTING ===
+        
+        # Prepare broadcast envelope
+        broadcast_envelope = create_envelope(
             MessageType.MSG_PUBLIC_CHANNEL.value,
-            exclude_sender=True,  # Don't echo back to sender
+            sender_id,
+            "*",
+            {
+                "ciphertext": payload["ciphertext"],
+                "sender_pub": payload["sender_pub"],
+                "content_sig": payload["content_sig"],
+            },
         )
+        
+        # Deliver to local members
+        delivered_local = 0
+        for member_id in server.public_channel.get_members():
+            # Skip sender if originating from user (don't echo)
+            if is_from_user and member_id == sender_id:
+                continue
+            
+            user_rec = server.users.get(member_id)
+            if user_rec and user_rec.location == "local" and user_rec.link:
+                await user_rec.link.send_message(broadcast_envelope if is_from_user else envelope)
+                delivered_local += 1
+        
+        # User origination: broadcast to all servers
+        if is_from_user:
+            broadcasted_servers = 0
+            for link in server.all_server_connection_links:
+                await link.send_message(broadcast_envelope)
+                broadcasted_servers += 1
+            
+            logger.info(
+                "MSG_PUBLIC_CHANNEL from user %s: %d local, %d servers",
+                sender_id[:8], delivered_local, broadcasted_servers
+            )
+        else:
+            logger.info(
+                "MSG_PUBLIC_CHANNEL relayed (sender %s): %d local",
+                sender_id[:8], delivered_local
+            )
 
 
 class UserFileTransferHandlers:
@@ -797,7 +825,8 @@ class UserFileTransferHandlers:
         payload = envelope.payload
         
         # Validate base required fields
-        required_fields = {"file_id", "index", "ciphertext", "iv", "tag"}
+        # Per SOCP v1.3: Removed AES fields (iv, tag). RSA-4096 only.
+        required_fields = {"file_id", "index", "ciphertext"}
         if not await GenericValidators.validate_required_fields(
             server, connection, payload, required_fields, sender_id
         ):
@@ -819,10 +848,8 @@ class UserFileTransferHandlers:
         recipient_id = envelope.to
         
         if is_uuid_v4(recipient_id):
-            # DM mode - wrapped_key REQUIRED per SOCP §9.4
-            if "wrapped_key" not in payload:
-                await connection.on_error_bad_key("wrapped_key required for DM file transfer", to_id=sender_id)
-                return
+            # DM mode - Per SOCP v1.3, RSA-4096 only (no wrapped_key for AES)
+            # Each chunk is encrypted directly with recipient's RSA key
             
             # FILE_CHUNK is forwarded (wrapped for remote delivery)
             await DMRecipientRouter(server, connection, sender_id, recipient_id) \
