@@ -124,7 +124,7 @@ class GenericRouters:
         """YESEXPR
         Wrapper for SERVER_DELIVER messages to add the user_id field.
         """
-        deliver_envelope = create_envelope(MessageType.SERVER_DELIVER.value, envelope.from_, envelope.to,envelope.to_dict())
+        deliver_envelope = create_envelope(MessageType.SERVER_DELIVER.value, envelope.from_, envelope.to,envelope.to_dict(),ts=envelope.ts)
        
         deliver_envelope.payload["user_id"] = envelope.to
         return deliver_envelope
@@ -168,6 +168,8 @@ class GenericRouters:
             if getattr(user_rec, "location", None) == "local":
                 local_link = getattr(user_rec, "link", None)
                 if local_link:
+                    # Note: route_to_public_channel is used for FILE_* messages
+                    # FILE_* don't have content_sig (only ciphertext), so new ts is fine
                     deliver_env = create_envelope(
                         message_type,
                         sender_id,
@@ -181,7 +183,7 @@ class GenericRouters:
         broadcast_env = create_envelope(
             message_type,
             sender_id,
-            "public",
+            "*",
             payload,
         )
         for link in server.all_server_connection_links:
@@ -380,6 +382,7 @@ class ServerMessageHandlers:
             server.local_server.id,
             user_id,
             deliver_payload,
+            ts=envelope.ts,  # Preserve original timestamp
         )
         
         # For remote, forward the original SERVER_DELIVER envelope as-is
@@ -552,6 +555,8 @@ class ServerMessageHandlers:
                 local_link = getattr(user_rec, "link", None)
                 if local_link:
                     # Send key to local user
+                    # Note: PUBLIC_CHANNEL_KEY_SHARE content_sig = SHA256(shares || creator_pub)
+                    # Per SOCP §12, ts is NOT part of the key share signature, so we can use new ts
                     key_share_env = create_envelope(
                         "PUBLIC_CHANNEL_KEY_SHARE",
                         server.local_server.id,
@@ -602,7 +607,7 @@ class UserMessageHandlers:
         payload = envelope.payload
         required_fields = {
             "ciphertext",
-            "sender", "sender_pub", "content_sig",
+            "sender_pub", "content_sig",
         }
         if not await GenericValidators.validate_required_fields(
             server, connection, payload, required_fields, sender_id
@@ -614,17 +619,19 @@ class UserMessageHandlers:
         # Server must add it for SERVER_DELIVER and USER_DELIVER
         base_payload = {
             "ciphertext": payload["ciphertext"],
-            "sender": payload["sender"],
+            "sender": sender_id,  # Add sender from envelope.from_
             "sender_pub": payload["sender_pub"],
             "content_sig": payload["content_sig"],
             }
         
         # Prepare envelopes for local and remote delivery
+        # CRITICAL: Preserve original timestamp for content_sig verification per SOCP §12
         local_env = create_envelope(
             MessageType.USER_DELIVER.value,
             server.local_server.id,
             recipient_id,
             base_payload,
+            ts=envelope.ts,  # Preserve original timestamp
         )
         
         # For remote delivery, get recipient's server location
@@ -638,6 +645,7 @@ class UserMessageHandlers:
             server.local_server.id,
             remote_server_id,
             {"user_id": recipient_id, **base_payload},
+            ts=envelope.ts,  # Preserve original timestamp
         )
         
         # Use builder pattern for DM routing
@@ -691,6 +699,7 @@ class UserMessageHandlers:
         # === ROUTING ===
         
         # Prepare broadcast envelope
+        # CRITICAL: Preserve original timestamp for content_sig verification per SOCP §12
         broadcast_envelope = create_envelope(
             MessageType.MSG_PUBLIC_CHANNEL.value,
             sender_id,
@@ -700,6 +709,7 @@ class UserMessageHandlers:
                 "sender_pub": payload["sender_pub"],
                 "content_sig": payload["content_sig"],
             },
+            ts=envelope.ts,  # Preserve original timestamp
         )
         
         # Deliver to local members

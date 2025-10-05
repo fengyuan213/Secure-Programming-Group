@@ -11,7 +11,7 @@ logs/
 **/.DS_Store
 # C extensions
 *.so
-
+.socp/
 # Distribution / packaging
 .Python
 build/

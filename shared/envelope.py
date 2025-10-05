@@ -15,6 +15,24 @@ _ALLOW_UNSIGNED_TYPES: Set[str] = {
     "SERVER_WELCOME",
     "SERVER_ANNOUNCE",
 }
+class InvalidSigError(Exception):
+    """Raised when a specific condition in my app fails."""
+    pass
+class BadKeyError(Exception):
+    """Raised when a specific condition in my app fails."""
+    pass
+class TimeoutError(Exception):
+    """Raised when a specific condition in my app fails."""
+    pass
+class UnknownTypeError(Exception):
+    """Raised when a specific condition in my app fails."""
+    pass
+class NameInUseError(Exception):
+    """Raised when a specific condition in my app fails."""
+    pass
+class UserNotFoundError(Exception):
+    """Raised when a specific condition in my app fails."""
+    pass
 
 @dataclass
 class Envelope:
@@ -48,7 +66,7 @@ class Envelope:
         try:
             data = json.loads(json_str)
         except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON: {e}")
+            raise BadKeyError(f"Invalid JSON: {e}")
         
         return cls.from_dict(data)
     
@@ -59,39 +77,39 @@ class Envelope:
         required_fields = {'type', 'from', 'to', 'ts', 'payload'}
         missing = required_fields - set(data.keys())
         if missing:
-            raise ValueError(f"Missing required fields: {missing}")
+            raise BadKeyError(f"Missing required fields: {missing}")
         
         # Validate types
         if not isinstance(data['type'], str):
-            raise ValueError("'type' must be a string")
+            raise BadKeyError("'type' must be a string")
         if not isinstance(data['from'], str):
-            raise ValueError("'from' must be a string")
+            raise BadKeyError("'from' must be a string")
         if not isinstance(data['to'], str):
-            raise ValueError("'to' must be a string")
+            raise BadKeyError("'to' must be a string")
         if not isinstance(data['ts'], int):
-            raise ValueError("'ts' must be an integer")
+            raise BadKeyError("'ts' must be an integer")
         if not isinstance(data['payload'], dict):
-            raise ValueError("'payload' must be a dictionary")
+            raise BadKeyError("'payload' must be a dictionary")
         
     
         # Validate UUID format for from/to (except special cases)
         if not _validate_from_field(data['from']):
-            raise ValueError(f"Invalid 'from' field: {data['from']}")
+            raise BadKeyError(f"Invalid 'from' field: {data['from']}")
         if not _validate_to_field(data['to'], data['type']):
-            raise ValueError(f"Invalid 'to' field: {data['to']} for type {data['type']}")
+            raise BadKeyError(f"Invalid 'to' field: {data['to']} for type {data['type']}")
         
         # Validate signature if present
         sig = data.get('sig')
         if sig is not None and not isinstance(sig, str):
-            raise ValueError("'sig' must be a string")
+            raise BadKeyError("'sig' must be a string")
         
         # Validate signature format if present
         if sig is not None and not is_base64url(sig):
-            raise ValueError("'sig' must be valid base64url")
+            raise BadKeyError("'sig' must be valid base64url")
 
         # Check if signature is required but missing
         if data['type'] not in _ALLOW_UNSIGNED_TYPES and sig is None:
-            raise ValueError(f"Message type '{data['type']}' requires signature")
+            raise InvalidSigError(f"Message type '{data['type']}' requires signature")
         
         return cls(
             type=data['type'],
@@ -128,6 +146,8 @@ def _validate_to_field(to_field: str, msg_type: str) -> bool:
     # Special cases
     if to_field == "*":  # Broadcast
         return True
+    if to_field == "public":  # Public channel (for MSG_PUBLIC_CHANNEL, FILE_* to public channel)
+        return True
     if msg_type == "SERVER_HELLO_JOIN" and is_ipv4_hostport(to_field):  # Bootstrap only
         return True
     
@@ -145,3 +165,11 @@ def create_envelope(msg_type: str, from_id: str, to_id: str, payload: Dict[str, 
         payload=payload,
         sig=signature
     )
+def verify_transport_envelope(envelope: Envelope, pubkey_b64url: str) -> bool:
+    """Verify the envelope signature"""
+    from shared.crypto.crypto import rsassa_pss_verify
+    if envelope.sig is None:
+        return False
+    ok = rsassa_pss_verify(pubkey_b64url, json.dumps(envelope.payload, separators=(',', ':'), sort_keys=True).encode(), envelope.sig)
+    return ok
+         

@@ -41,7 +41,7 @@ class UserRecord:
     id: str
     link: Optional[ConnectionLink]   # None if remote
     location: Location                 # "local" or server_id  # pyright: ignore[reportInvalidTypeForm]
-
+ 
     def is_local(self) -> bool:
         return self.location == "local"
     def is_remote(self) -> bool:

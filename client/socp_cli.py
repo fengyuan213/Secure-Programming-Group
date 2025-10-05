@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -14,11 +13,12 @@ from rich.console import Console
 from rich.table import Table
 from aioconsole import ainput
 
+from shared.crypto.signer import RSAClientContentSigner
 from shared.envelope import create_envelope
 from shared.crypto.keys import RSAKeypair, load_keypair, save_keypair
 from .state import Presence
 from client.pubdir import PubKeyDirectory
-from shared.crypto.crypto import rsa_oaep_encrypt, rsassa_pss_sign, rsassa_pss_verify, rsa_oaep_decrypt
+from shared.crypto.crypto import rsa_oaep_encrypt, rsa_oaep_decrypt
 from .ws_client import ClientSession
 
 app = typer.Typer(help="SOCP v1.3 Client CLI")
@@ -58,7 +58,10 @@ def run(
     """Start interactive client loop (placeholder)."""
     uid = user_id or str(uuid.uuid4())
     console.print(f"[bold green]SOCP client starting[/] as {uid[:8]} on {server}")
-    key_path = Path.home() / ".socp" / f"{uid}"
+    key_path = Path.cwd() / ".socp" / f"{uid}"
+    pub_key_dir = Path.cwd() / ".socp" / f"{uid}.json"
+    
+    pubdir = PubKeyDirectory(pub_key_dir)
     kp = load_keypair(key_path)
     if kp is None:
         kp = RSAKeypair.generate()
@@ -66,7 +69,8 @@ def run(
         console.print("Generated new RSA-4096 keypair")
 
     async def main_loop() -> None:
-        session = ClientSession(user_id=uid, server_ws_url=server)
+        signer = RSAClientContentSigner(kp)
+        session = ClientSession(user_id=uid, server_ws_url=server, signer=signer)
         await session.connect()
         hello_ts = _now_ms()
         hello_env = create_envelope(
@@ -85,6 +89,7 @@ def run(
         await session.send(hello_env)
 
         presence = Presence()
+       
 
         async def default_handler(env):
             if env.type == "USER_ADVERTISE":
@@ -92,8 +97,12 @@ def run(
                 meta = env.payload.get("meta", {})
                 presence.add(uid2, meta)
                 # Auto-store pubkey if present in meta per SOCP §8.2
+                console.print(f"[dim]USER_ADVERTISE for {uid2[:8]}: meta={list(meta.keys())}[/]")
                 if "pubkey" in meta and meta["pubkey"]:
-                    PubKeyDirectory().set(uid2, meta["pubkey"])
+                    pubdir.set(uid2, meta["pubkey"])
+                    console.print(f"[dim green]Stored pubkey for {uid2[:8]}[/] key:{meta["pubkey"][:40]}...")
+                else:
+                    console.print(f"[dim red]No pubkey in meta for {uid2[:8]}[/]")
             elif env.type == "USER_REMOVE":
                 uid2 = env.payload.get("user_id")
                 presence.remove(uid2)
@@ -102,16 +111,16 @@ def run(
                 try:
                     ct = env.payload.get("ciphertext", "")
                     sender_pub = env.payload.get("sender_pub", "")
+                    sender_id = env.payload.get("sender", "")
                     sig = env.payload.get("content_sig", "")
-                    if not ct or not sender_pub or not sig:
+                    if not ct or not sender_pub or not sig or not sender_id:
                         console.print("[red]Rejected DM: missing required fields[/]")
                         return
-                    canonical = (ct + env.from_ + env.to + str(env.ts)).encode()
-                    if not rsassa_pss_verify(sender_pub, canonical, sig):
+                    if not RSAClientContentSigner.verify_dm_content(sender_pub, ct, sender_id, uid, env.ts, sig):
                         console.print("[red]Rejected DM: invalid content_sig[/]")
                         return
                     pt = rsa_oaep_decrypt(kp.private_pem, ct).decode()
-                    console.print(f"[bold cyan]DM[/] from {env.from_[:8]}...: {pt}")
+                    console.print(f"[bold cyan]DM[/] from {sender_id[:8]}...: {pt}")
                 except Exception as e:
                     console.print(f"[red]DM handling error[/]: {e}")
             elif env.type == "MSG_PUBLIC_CHANNEL":
@@ -123,8 +132,7 @@ def run(
                     if not ct or not sender_pub or not sig:
                         console.print("[red]Rejected public msg: missing fields[/]")
                         return
-                    canonical = (ct + env.from_ + str(env.ts)).encode()
-                    if not rsassa_pss_verify(sender_pub, canonical, sig):
+                    if not RSAClientContentSigner.verify_public_channel_content(sender_pub, ct, env.from_, env.ts, sig):
                         console.print("[red]Rejected public msg: invalid content_sig[/]")
                         return
                     # For now, assume public channel uses placeholder ciphertext
@@ -187,7 +195,8 @@ def run(
                     # Safe write
                     from pathlib import Path
                     safe_name = "".join(c for c in f.name if c.isalnum() or c in ".-_") or "received_file"
-                    out_path = Path.home() / "Downloads" / safe_name
+                    out_path = Path.cwd() / ".socp" / "downloads" / safe_name
+                    out_path.parent.mkdir(parents=True, exist_ok=True)  # Create directory if it doesn't exist
                     out_path.write_bytes(data)
                     console.print(f"[bold green]Saved file[/] {f.name} to {out_path}")
                     del presence._files[file_id]
@@ -199,7 +208,7 @@ def run(
                 console.print(f"[dim]ACK {env.payload.get('msg_ref')}[/]")
             else:
                 console.print(f"[dim]recv {env.type}[/]")
-        console.print("Connected to server")
+        console.print(f"Connected to server, uid:  {uid}")
         recv_task = asyncio.create_task(session.recv_loop(default_handler))
 
         try:
@@ -226,11 +235,11 @@ def run(
                     except Exception:
                         console.print("Usage: /pubkey set <uid> <b64url>")
                         continue
-                    PubKeyDirectory().set(target, key)
+                    pubdir.set(target, key)
                     console.print("Saved pubkey")
                     continue
                 if line == "/pubkey list":
-                    for k, v in PubKeyDirectory().all().items():
+                    for k, v in pubdir.all().items():
                         console.print(f"{k[:8]}... {v[:16]}...")
                     continue
                 if line.startswith("/tell "):
@@ -240,17 +249,16 @@ def run(
                     except Exception:
                         console.print("Usage: /tell <user> <message>")
                         continue
-                    recip = PubKeyDirectory().get(dest)
+                    recip = pubdir.get(dest)
                     if not recip:
                         console.print("Recipient pubkey unknown. Use /pubkey set <uid> <b64url>")
                         continue
                     ts = _now_ms()
                     ciphertext = rsa_oaep_encrypt(recip, msg.encode())
-                    canonical = (ciphertext + uid + dest + str(ts)).encode()
                     payload = {
                         "ciphertext": ciphertext,
                         "sender_pub": kp.public_b64url(),
-                        "content_sig": rsassa_pss_sign(kp.private_pem, canonical),
+                        "content_sig": signer.sign_dm_content(ciphertext, uid, dest, ts),
                     }
                     env = create_envelope("MSG_DIRECT", uid, dest, payload, ts=ts)
                     await session.send(env)
@@ -261,11 +269,10 @@ def run(
                     # Placeholder ciphertext for public channel in this milestone
                     import base64
                     ciphertext = base64.urlsafe_b64encode(msg.encode()).decode().rstrip("=")
-                    canonical = (ciphertext + uid + str(ts)).encode()
                     payload = {
                         "ciphertext": ciphertext,
                         "sender_pub": kp.public_b64url(),
-                        "content_sig": rsassa_pss_sign(kp.private_pem, canonical),
+                        "content_sig": signer.sign_public_channel_content(ciphertext, uid, ts),
                     }
                     env = create_envelope("MSG_PUBLIC_CHANNEL", uid, "public", payload, ts=ts)
                     await session.send(env)
@@ -294,7 +301,7 @@ def run(
                     }
                     await session.send(create_envelope("FILE_START", uid, dest, manifest, ts=_now_ms()))
                     # Chunks (encrypt each with recip RSA)
-                    recip = PubKeyDirectory().get(dest)
+                    recip = pubdir.get(dest)
                     if not recip:
                         console.print("Recipient pubkey unknown for chunks. Aborting.")
                         continue

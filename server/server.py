@@ -17,7 +17,7 @@ from server.core.MemoryTable import *
 from shared.crypto.crypto import rsassa_pss_verify
 from shared.crypto.keys import RSAKeypair, load_keypair, save_keypair
 
-from shared.crypto.signer import RSAServerTransportSigner
+from shared.crypto.signer import RSATransportSigner
 import websockets
 
 from server.core.ConnectionLink import ConnectionLink
@@ -25,7 +25,8 @@ from server.core.MessageCache import MessageDeduplicationCache
 from server.core.MessageTypes import MessageType, ConnectionType
 from server.core.MessageHandlers import SERVER_HANDLER_REGISTRY, USER_HANDLER_REGISTRY
 from server.core.PublicChannelManager import PublicChannelManager
-from shared.envelope import Envelope, create_envelope
+from server.storage import SOCPStorage
+from shared.envelope import BadKeyError, Envelope, InvalidSigError, NameInUseError, UnknownTypeError, UserNotFoundError, create_envelope, verify_transport_envelope
 from shared.utils import is_uuid_v4
 from shared.log import configure_root_logging, get_logger
 
@@ -88,6 +89,7 @@ class SOCPServer:
         heartbeat_interval: float = 15.0,
         heartbeat_timeout: float = 45.0,
         dedup_ttl: float = 120.0,
+        autosave_interval: float = 60.0,  # Save state every 60 seconds
     ):
         
         # These two are single source of truth for all servers and users on the network.
@@ -98,6 +100,7 @@ class SOCPServer:
 
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
+        self.autosave_interval = autosave_interval
         
         # Track reconnection attempts per server (for exponential backoff)
         self._reconnection_attempts: Dict[str, int] = {}
@@ -108,12 +111,15 @@ class SOCPServer:
         # Duplicate suppression per SOCP §10
         self.message_cache = MessageDeduplicationCache(ttl=dedup_ttl)
         
+        # Initialize persistent storage
+        self.storage = SOCPStorage(storage_path)
+        
         # Public channel manager per SOCP §9.3
         self.public_channel = PublicChannelManager(self)
 
         # Initialize storage path for pubkey directory
         self.keypair =  self._load_or_create_server_key()
-        self.signer = RSAServerTransportSigner(self.keypair)
+        self.signer = RSATransportSigner(self.keypair)
         
         
         # load or create persistent server UUID and register ourselves
@@ -232,7 +238,7 @@ class SOCPServer:
             logger.warning("Missing signature on message %s from %s", envelope.type, server_id)
             return False
         try:
-            ok = rsassa_pss_verify(pubkey_b64url, json.dumps(envelope.payload, separators=(',', ':'), sort_keys=True).encode(), envelope.sig)
+            ok = verify_transport_envelope(envelope, pubkey_b64url)
             if not ok:
                 logger.warning("Transport signature verification failed for %s from %s", envelope.type, server_id)
             return ok
@@ -550,6 +556,16 @@ class SOCPServer:
         except asyncio.TimeoutError:
             logger.warning("Timeout waiting for first message")
             raise
+        except ValueError as e:
+            error_msg = str(e)
+            logger.error(f"First message validation error: {error_msg}")
+            
+            # Route to appropriate SOCP error code per §9.5
+            if "requires signature" in error_msg or "sig" in error_msg.lower():
+                await connection.on_error_bad_key(error_msg)
+            else:
+                await connection.on_error_bad_key(error_msg)
+            raise
         except Exception as e:
             logger.error(f"Error handling first message: {e}")
             raise
@@ -633,6 +649,7 @@ class SOCPServer:
                         "meta": {"pubkey": existing_pubkey} if existing_pubkey else {}
                     },
                 )
+                logger.info(f"Sending USER_ADVERTISE to {user_id[:8]} for existing user {existing_user_id[:8]}, has_pubkey={bool(existing_pubkey)}, pubkey_len={len(existing_pubkey) if existing_pubkey else 0}")
                 await connection.send_message(catchup_env)
                 catchup_count += 1
         
@@ -643,6 +660,7 @@ class SOCPServer:
         # Include pubkey in meta per SOCP §8.2
         meta_with_pubkey = envelope.payload.get("meta", {}).copy()
         meta_with_pubkey["pubkey"] = user_pubkey if user_pubkey else ""
+        logger.info(f"Broadcasting USER_ADVERTISE for {user_id[:8]}, has_pubkey={bool(user_pubkey)}, pubkey_len={len(user_pubkey) if user_pubkey else 0}")
         await self.broadcast_user_advertise(user_id, meta_with_pubkey)
     
     async def handle_server_hello_join(self, connection: ConnectionLink, envelope: Envelope) -> None:
@@ -744,9 +762,34 @@ class SOCPServer:
                 await self.handle_server_message(connection, envelope)
             else:
                 logger.warning(f"Message from unidentified connection: {envelope.type}")
-                
+        except InvalidSigError as e:
+            logger.error(f"Invalid signature: {e}")
+            await connection.on_error_invalid_sig(str(e))
+        except BadKeyError as e:
+            logger.error(f"Bad key: {e}")
+            await connection.on_error_bad_key(str(e))
+        except TimeoutError as e:
+            logger.error(f"Timeout: {e}")
+            await connection.on_error_timeout(str(e))
+        except UnknownTypeError as e:
+            logger.error(f"Unknown type: {e}")
+            await connection.on_error_unknown_type(str(e))
+        except NameInUseError as e:
+            logger.error(f"Name in use: {e}")
+            await connection.on_error_name_in_use(str(e))
+        except UserNotFoundError as e:
+            logger.error(f"User not found: {e}")
+            await connection.on_error_user_not_found(str(e))
+        except ValueError as e:
+            
+            error_msg = str(e)
+            logger.error(f"Value error: {error_msg}")
+            
+            await connection.on_error_unknown_type(str(e))
+
         except Exception as e:
             logger.error(f"Error processing message: {e}")
+            # Only use UNKNOWN_TYPE for truly unknown issues
             await connection.on_error_unknown_type(str(e))
     
     async def handle_user_message(self, connection: ConnectionLink, envelope: Envelope) -> None:
