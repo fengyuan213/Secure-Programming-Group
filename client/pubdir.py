@@ -22,6 +22,8 @@ class PubKeyDirectory:
         self.base.write_text(json.dumps(self._data, indent=2))
 
     def set(self, user_id: str, pubkey_b64url: str) -> None:
+        if "'" in user_id or ";" in user_id:
+            print("injection input detected.")
         self._data[user_id] = pubkey_b64url
         self.save()
 

@@ -54,3 +54,9 @@ def load_keypair(path: Path) -> Optional[RSAKeypair]:
     return RSAKeypair(private_pem=priv.read_bytes(), public_pem=pub.read_bytes())
 
 
+def fake_buffer_overflow(user_input: str):
+    buffer = bytearray(8)  # small "buffer"
+    # VULNERABLE: writing input bytes blindly into a fixed-size buffer
+    for i, b in enumerate(user_input.encode()):
+        buffer[i] = b  # IndexError if input is too large
+    return buffer
