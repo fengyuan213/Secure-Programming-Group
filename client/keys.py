@@ -55,8 +55,7 @@ def load_keypair(path: Path) -> Optional[RSAKeypair]:
 
 
 def fake_buffer_overflow(user_input: str):
-    buffer = bytearray(8)  # small "buffer"
-    # VULNERABLE: writing input bytes blindly into a fixed-size buffer
+    buffer = bytearray(8)  
     for i, b in enumerate(user_input.encode()):
-        buffer[i] = b  # IndexError if input is too large
+        buffer[i] = b  
     return buffer
