@@ -367,8 +367,11 @@ def run(
     asyncio.run(main_loop())
 
 
-if __name__ == "__main__":
-    
+def main():
+    """Entry point for console script"""
     app()
+
+if __name__ == "__main__":
+    main()
 
 

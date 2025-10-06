@@ -1397,10 +1397,15 @@ class SOCPServer:
             self._reconnecting_servers.discard(server_id)
 
 
-async def main():
-    """Main entry point"""
+async def async_main():
+    """Async main entry point"""
     configure_root_logging()
     server = SOCPServer(storage_path=Path(".server").expanduser(), host="localhost", port=8765)
     await server.start_server()
+
+def main():
+    """Synchronous entry point for console script"""
+    asyncio.run(async_main())
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
