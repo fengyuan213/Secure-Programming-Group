@@ -35,6 +35,8 @@ class ConnectionLink:
         self.server_id: Optional[str] = None
         self.local_server: ServerRecord = local_server
         self.last_seen: float = time.monotonic()
+        self.is_bootstrap_handshake = False  # Flag for temporary bootstrap connections
+
         
     def get_user_record(self, server: "SOCPServer") -> Optional[UserRecord]:
         return server.users.get(self.user_id) if self.user_id else None

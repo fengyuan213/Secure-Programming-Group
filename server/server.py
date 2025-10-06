@@ -121,7 +121,8 @@ class SOCPServer:
         self.keypair =  self._load_or_create_server_key()
         self.signer = RSATransportSigner(self.keypair)
         
-        
+        self._bootstrap_server_ids: Set[str] = set()
+    
         # load or create persistent server UUID and register ourselves
   
         persisted_id = self._load_or_create_server_id()
@@ -153,7 +154,7 @@ class SOCPServer:
                 if server_id == self.local_server.id:
                     continue
                 if self._is_self_endpoint(server_info["host"], server_info["port"]):
-                    logger.debug(f"Skipping persisted server {server_id} (self-endpoint {server_info['host']}:{server_info['port']})")
+                    logger.warning(f"Skipping persisted server {server_id} (self-endpoint {server_info['host']}:{server_info['port']}) - this indicates corrupted state!")
                     continue
                     
                 self.add_update_server(
@@ -162,6 +163,7 @@ class SOCPServer:
                     None,  # No link yet (will reconnect)
                     server_info["pubkey"]
                 )
+                logger.debug(f"Loaded server {server_id} from storage: {server_info['host']}:{server_info['port']}")
             
             # Load known users (remote users only - local users will reconnect)
             users_data = self.storage.load_users()
@@ -201,11 +203,16 @@ class SOCPServer:
     def _save_state(self) -> None:
         """Save current state to disk."""
         try:
+            # Filter out local server before saving (don't save ourselves)
+            remote_servers = {
+                sid: server for sid, server in self.servers.items()
+                if sid != self.local_server.id
+            }
+            
             self.storage.save_all(
-                self.servers,
+                remote_servers,
                 self.users,
                 self.public_channel.channel,
-                self.local_server.id
             )
         except Exception as e:
             logger.error(f"Failed to save state: {e}", exc_info=True)
@@ -315,6 +322,25 @@ class SOCPServer:
         
         # Otherwise, exact host match
         return host == self_host and port == self.local_server.endpoint.port
+    
+    def _find_server_by_endpoint(self, host: str, port: int, exclude_server_id: Optional[str] = None) -> Optional[str]:
+        """
+        Find if an endpoint (host:port) is already registered under any server_id.
+        
+        Args:
+            host: The host to check
+            port: The port to check
+            exclude_server_id: Optional server_id to exclude from search (e.g., when checking for duplicates)
+        
+        Returns:
+            The server_id that owns this endpoint, or None if endpoint is not registered
+        """
+        for sid, server_rec in self.servers.items():
+            if exclude_server_id and sid == exclude_server_id:
+                continue
+            if server_rec.endpoint.host == host and server_rec.endpoint.port == port:
+                return sid
+        return None
 
 
     def _verify_server_signature(self, server_id: str, envelope: Envelope) -> bool:
@@ -450,7 +476,7 @@ class SOCPServer:
 
         for entry in introducers:
             host = entry["host"]; port = entry["port"]
-            # Skip self to avoid self-bootstrapping loops
+  
             if (host == self.local_server.endpoint.host or host in {"127.0.0.1", "localhost"} and self.local_server.endpoint.host in {"127.0.0.1", "localhost"}) and port == self.local_server.endpoint.port:
                 logger.info("Skipping bootstrap entry pointing to self")
                 continue
@@ -458,6 +484,8 @@ class SOCPServer:
             try:
                 async with websockets.connect(url) as ws:
                     link = ConnectionLink(ws, self.signer, self.local_server, connection_type="server")
+                    # Mark this as a bootstrap handshake connection (temporary)
+                    link.is_bootstrap_handshake = True
                     # Send SERVER_HELLO_JOIN to introducer (to=host:port per spec)
                     join_env = create_envelope(
                         MessageType.SERVER_HELLO_JOIN.value,
@@ -481,11 +509,12 @@ class SOCPServer:
                             # introducer identity from frame
                             introducer_id = welcome.from_
                             if is_uuid_v4(introducer_id):
-                                # Don't pass the temporary bootstrap link - let connect_loop establish persistent connection
-                                self.add_update_server(introducer_id, ServerEndpoint(host=host, port=port), None, entry.get("pubkey", ""))
-                                 #self.server_addrs[introducer_id] = (host, port)
-                                #if entry.get("pubkey"):
-                                #    self.server_pubkeys[introducer_id] = entry.get("pubkey", "")
+                                # Skip self to avoid self-bootstrapping loops
+
+                                self._bootstrap_server_ids.add(introducer_id)  # Mark as bootstrap as this is bootstrap sever_id
+                                
+                                self.add_update_server(introducer_id, ServerEndpoint(host=host, port=port), link, entry.get("pubkey", ""))
+              
                             # Populate server_addrs from payload (accept key 'servers')
                             peers = welcome.payload.get("servers") or []
                             for p in peers:
@@ -495,6 +524,7 @@ class SOCPServer:
                                 h = p.get("host"); prt = p.get("port")
                                 if isinstance(sid, str) and isinstance(h, str) and isinstance(prt, int):
                                     if sid != self.local_server.id:
+                                        # ✅ Peers should have link=None, not the bootstrap link
                                         self.add_update_server(sid, ServerEndpoint(host=h, port=prt), None, p.get("pubkey", ""))
                                         #self.server_addrs[sid] = (h, prt)
                                         #if "pubkey" in p and isinstance(p.get("pubkey"), str):
@@ -503,6 +533,10 @@ class SOCPServer:
                         pass
                     # Announce ourselves network-wide
                     await self.broadcast_server_announce(self.local_server.id, {"host": self.local_server.endpoint.host, "port": self.local_server.endpoint.port, "pubkey": self.local_server.pubkey})
+                    # Clear the temporary bootstrap link after handshake completes
+                    if introducer_id in self.servers:
+                        await link.close()
+                        self.add_update_server(introducer_id, self.servers[introducer_id].endpoint, None, self.servers[introducer_id].pubkey)
                     break  # stop after first successful introducer
             except Exception as e:
                 logger.warning(f"Bootstrap to {url} failed: {e}")
@@ -554,7 +588,18 @@ class SOCPServer:
                     close_code=1011,
                     close_reason="health timeout",
                 )
-
+    # In connect_to_known_servers() around line 558:
+    def should_initiate_connection(self, remote_server_id: str) -> bool:
+        """
+        Use tie-breaking ONLY for bootstrap servers to prevent bidirectional races.
+        For dynamically discovered servers, always try to connect (they won't connect back).
+        """
+        # If not a bootstrap server, always initiate (no race condition)
+        if remote_server_id not in self._bootstrap_server_ids:
+            return True
+        
+        # For bootstrap servers, use deterministic tie-breaking
+        return self.local_server.id < remote_server_id
     async def connect_to_known_servers(self) -> None:
         """Attempt outbound connections to all entries in server_addrs that aren't connected."""
         for server_id, server in list(self.servers.items()):
@@ -567,7 +612,8 @@ class SOCPServer:
                 logger.debug(f"Skipping self-connection to {h}:{p} (server_id={server_id})")
                 continue
             # If already connected (link present), skip
-            if server.is_connected():
+            # Tie-breaking: only lower UUID initiates outbound connection for both servers in bootstrap
+            if server.is_connected() or not self.should_initiate_connection(server_id):
                 continue
             link: Optional[ConnectionLink] = None
             try:
@@ -790,12 +836,44 @@ class SOCPServer:
             await connection.on_error_bad_key(f"Missing required fields: {missing}", to_id=envelope.from_)
             return
 
+        # Mark this as a bootstrap handshake connection (temporary)
+        connection.is_bootstrap_handshake = True
+            
         # Assign server ID ensuring uniqueness as per spec
         assigned_server_id = requested_server_id if is_uuid_v4(requested_server_id) else str(uuid.uuid4())
-        if assigned_server_id in self.servers or assigned_server_id == self.local_server.id:
-            logger.info(f"Reassigning duplicate server_id {requested_server_id}")
+        joining_host = envelope.payload["host"]
+        joining_port = envelope.payload["port"]
+        joining_endpoint = ServerEndpoint(host=joining_host, port=joining_port)
+        
+        # ✅ CRITICAL FIX: Check if this ENDPOINT is already registered under a different server_id
+        endpoint_server_id = self._find_server_by_endpoint(joining_host, joining_port)
+        
+        if endpoint_server_id is not None:
+            # This endpoint is already registered!
+            if endpoint_server_id == assigned_server_id:
+                # Same ID, same endpoint - this is a reconnection
+                logger.info(f"Server {assigned_server_id} reconnecting from {joining_host}:{joining_port}")
+                # Update the existing entry
+                assigned_server_id = endpoint_server_id
+            else:
+                # Different ID, same endpoint - this is the BUG we're fixing!
+                logger.warning(
+                    f"Server at {joining_host}:{joining_port} trying to join as {requested_server_id}, "
+                    f"but already registered as {endpoint_server_id}. Using existing ID."
+                )
+                # Use the existing server_id for this endpoint
+                assigned_server_id = endpoint_server_id
+        elif assigned_server_id in self.servers:
+            # Server ID exists but with DIFFERENT endpoint - this is a true duplicate ID
+            existing_server = self.servers[assigned_server_id]
+            logger.warning(
+                f"Server_id {assigned_server_id} already registered at "
+                f"{existing_server.endpoint.host}:{existing_server.endpoint.port}, "
+                f"new server at {joining_host}:{joining_port} will get new ID"
+            )
+            # Generate a new unique ID
             assigned_server_id = str(uuid.uuid4())
-            while assigned_server_id in self.servers or assigned_server_id == self.local_server.id:
+            while assigned_server_id in self.servers:
                 assigned_server_id = str(uuid.uuid4())
 
         # Register the server (but don't save the temporary bootstrap connection)
@@ -804,7 +882,7 @@ class SOCPServer:
         connection.identified = True
         # Don't register the bootstrap connection - it's temporary and will close after handshake
         # The persistent connection will be established via SERVER_HELLO_LINK
-        self.add_update_server(assigned_server_id, ServerEndpoint(host=envelope.payload["host"], port=envelope.payload["port"]), None, envelope.payload.get("pubkey", ""))
+        self.add_update_server(assigned_server_id, joining_endpoint, connection, envelope.payload.get("pubkey", ""))
 
         logger.info(f"Server {assigned_server_id} joined from {envelope.payload['host']}:{envelope.payload['port']}")
 
@@ -830,7 +908,7 @@ class SOCPServer:
             welcome_payload
         )
         await connection.send_message(welcome_envelope)
-
+        await self.cleanup_connection(connection)
         # Broadcast SERVER_ANNOUNCE to all other servers
         await self.broadcast_server_announce(assigned_server_id, envelope.payload)
 
@@ -847,11 +925,10 @@ class SOCPServer:
         connection.connection_type = "server"
         connection.server_id = server_id
         connection.identified = True
+        connection.is_bootstrap_handshake = False # not a bootstrap handshake connection it is a real connection now
         
         self.add_update_server(server_id, ServerEndpoint(host=envelope.payload["host"], port=envelope.payload["port"]), connection, envelope.payload.get("pubkey", ""))
-        #self.servers[server_id] = connection
-        #self.server_addrs[server_id] = (envelope.payload["host"], envelope.payload["port"])
-        #self.server_pubkeys[server_id] = envelope.payload.get("pubkey", "")
+
         logger.info(f"Linked server {server_id} at {envelope.payload['host']}:{envelope.payload['port']}")
     
     async def process_message(self, connection: ConnectionLink, message: str) -> None:
@@ -1130,24 +1207,51 @@ class SOCPServer:
     
     async def cleanup_server_connection(self, server_id: str) -> None:
         """Clean up server connection and schedule reconnection"""
-        # Remove any user_locations that point to this server as host
-        stale_users = [user_id for user_id, record in self.users.items() if record.location == server_id]
-        for u in stale_users:
-            del self.users[u]
-        
+        def __cleanup__(server_record: ServerRecord):
+            # Remove any user_locations that point to this server as host
+            stale_users = [user_id for user_id, record in self.users.items() if record.location == server_record.id]
+            for u in stale_users:
+                del self.users[u]
+    
+            # Update record to clear the link but preserve endpoint and pubkey
+            self.add_update_server(server_id, server_record.endpoint, None, server_record.pubkey)
+            return
         # Clear the link but keep server record (endpoint + pubkey) for reconnection
         if server_id in self.servers:
             server_record = self.servers[server_id]
-            # Update record to clear the link but preserve endpoint and pubkey
-            self.add_update_server(server_id, server_record.endpoint, None, server_record.pubkey)
-            
-            # Schedule reconnection with exponential backoff (SOCP §11)
-            # Only schedule if we have server info to reconnect to
-            reconnect_task = asyncio.create_task(self._reconnect_to_server(server_id))
-            self._track_background_task(reconnect_task)
-            logger.info(f"Cleaned up server {server_id}, reconnection scheduled")
+                # Add grace period: only reconnect if connection was established for a while
+            # This prevents reconnecting temporary bootstrap connections
+            # Check if this was a temporary bootstrap handshake connection
+            connection_link = server_record.link
+            if connection_link:
+                # Check if this was a temporary bootstrap handshake
+                if connection_link.is_bootstrap_handshake:
+                    logger.debug(f"Bootstrap handshake ended for {server_id}, no reconnection needed")
+                    # ✅ Clean up the link!
+                    self.add_update_server(server_id, server_record.endpoint, None, server_record.pubkey)
+                    return
+                
+                # Check connection duration as fallback
+                connection_duration = time.monotonic() - getattr(connection_link, "last_seen", time.monotonic())
+                if connection_duration < 5.0:  # Connection lasted < 5 seconds
+                    logger.debug(f"Server {server_id} connection was temporary ({connection_duration:.1f}s), no reconnection needed")
+                    # ✅ Clean up the link!
+                    self.add_update_server(server_id, server_record.endpoint, None, server_record.pubkey)
+
+                    return
+                
+                # This is a real connection that died - clean up and schedule reconnection
+                __cleanup__(server_record)
+                reconnect_task = asyncio.create_task(self._reconnect_to_server(server_id))
+                self._track_background_task(reconnect_task)
+                logger.info(f"Cleaned up server {server_id}, reconnection scheduled")
+            else:
+                __cleanup__(server_record)
+                logger.info(f"Cleaned up server {server_id}, connection link was None")
         else:
             logger.info(f"Cleaned up server {server_id}, no reconnection scheduled (not in registry)")
+            
+      
     
     async def _reconnect_to_server(self, server_id: str, max_attempts: int = 10) -> None:
         """

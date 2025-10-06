@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from typing import TYPE_CHECKING, Callable, Awaitable, Dict, Set, Any, Optional
 
 from server.core.MemoryTable import UserRecord
@@ -294,6 +295,15 @@ class ServerMessageHandlers:
         existing = server.servers.get(origin_server_id)
         from server.core.ConnectionLink import ConnectionLink as CL
         link = existing if isinstance(existing, CL) else getattr(existing, "link", None)
+        # Log if we're changing an existing endpoint (potential misconfiguration)
+        if existing and hasattr(existing, 'endpoint'):
+            old_endpoint = existing.endpoint
+            if (old_endpoint.host != host or old_endpoint.port != port):
+                logger.warning(
+                    f"SERVER_ANNOUNCE from {origin_server_id} changed endpoint: "
+                    f"{old_endpoint.host}:{old_endpoint.port} → {host}:{port}"
+                )
+        
         server.add_update_server(origin_server_id, ServerEndpoint(host=host, port=port), link, pubkey)
         logger.info("Updated server %s from SERVER_ANNOUNCE to %s:%s", origin_server_id, host, port)
     
@@ -599,7 +609,14 @@ class ServerMessageHandlers:
         # for user_record in server.connected_local_users.values():
         #     if user_record.link is not None:
         #         await user_record.send_message(envelope)
-    
+    @staticmethod
+    async def handle_generic_error(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
+        """Handle generic error messages."""
+        origin_server_id = envelope.from_
+        payload = envelope.payload
+        error_type = payload.get("code")
+        error_message = payload.get("detail")
+        logger.error(f"Error {error_type} from {origin_server_id}: {error_message}")
 
 
 class UserMessageHandlers:
@@ -956,6 +973,7 @@ class UserFileTransferHandlers:
 
 # Handler registry mapping message types to their handlers
 SERVER_HANDLER_REGISTRY: Dict[MessageType, MessageHandler] = {
+    MessageType.ERROR: ServerMessageHandlers.handle_generic_error,
     MessageType.HEARTBEAT: ServerMessageHandlers.handle_heartbeat,
     MessageType.SERVER_ANNOUNCE: ServerMessageHandlers.handle_server_announce,
     MessageType.USER_ADVERTISE: ServerMessageHandlers.handle_presence_gossip,
