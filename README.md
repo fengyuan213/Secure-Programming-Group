@@ -31,6 +31,7 @@ Feel free to contact any of the members to discuss any part of the application.
 │   ├── utils.py                # Common validation helpers
 │   ├── log.py                  # Structured logging helpers
 │   └── crypto/                 # RSA/OAEP/PSS crypto abstractions
+├── tests/                      # Pytest suites. We've kept these for documentation purposes. Please ignore these, as they were run on very early builds of the application.
 │ 
 ├── run_2nd_server.py           # Helper for local multi-server testing
 ├── requirements.txt            # Python dependencies
@@ -118,6 +119,7 @@ socp-server
 # Run the test client (in another terminal) data stored in `.socp` in current running directory
 socp-client
 ```
+
 
 
 
