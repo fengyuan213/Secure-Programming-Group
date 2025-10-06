@@ -83,15 +83,19 @@ class PublicChannelState:
         """Check if user is a member of the channel."""
         return user_id in self.members
     
-    def get_member_info_list(self) -> list[Dict[str, Any]]:
+    def get_member_wrapped_list(self) -> list[Dict[str, Any]]:
         """
         Get member info list for PUBLIC_CHANNEL_UPDATED message.
         
-        Returns list of dicts with member_id only (SOCP v1.3).
+        Returns list of dicts with member_id and user_pubkey (SOCP §15.1).
+        Pubkeys are needed for encryption and signature verification.
         """
         return [
-            {"member_id": user_id}
-            for user_id in self.members.keys()
+            {
+                "member_id": user_id,
+                "wrapped_key": member.user_pubkey
+            }
+            for user_id, member in self.members.items()
         ]
 
 
@@ -141,6 +145,7 @@ class PublicChannelManager:
             server: Parent SOCPServer instance
         """
         self.server = server
+        self.version = 0
         self.channel = PublicChannelState()
         logger.info(
             "Initialized public channel manager (SOCP v1.3): group_id='%s', "
@@ -149,9 +154,9 @@ class PublicChannelManager:
             self.channel.creator_id,
         )
     
-    def add_member(self, user_id: str, user_pubkey: str) -> ChannelMember:
+    def add_update_member(self, user_id: str, user_pubkey: str) -> ChannelMember:
         """
-        Add a member to the public channel.
+        Add update a member to the public channel.
         
         Per SOCP §9.3: Users are added automatically when they connect.
         Per SOCP v1.3: No group key wrapping (RSA-4096 only).
@@ -171,11 +176,7 @@ class PublicChannelManager:
         """
         # Check if already a member
         if user_id in self.channel.members:
-            logger.debug(
-                "User %s already in public channel (version=%d)",
-                user_id[:8],
-                self.channel.version,
-            )
+            self.channel.members[user_id].user_pubkey = user_pubkey
             return self.channel.members[user_id]
         
         # Create member record (RSA-4096 only, no key wrapping)

@@ -533,10 +533,17 @@ class SOCPServer:
                         pass
                     # Announce ourselves network-wide
                     await self.broadcast_server_announce(self.local_server.id, {"host": self.local_server.endpoint.host, "port": self.local_server.endpoint.port, "pubkey": self.local_server.pubkey})
-                    # Clear the temporary bootstrap link after handshake completes
+                    
+                    # ✅ FIX: Keep the bootstrap connection open and transition it to persistent
+                    # This prevents broadcast gaps where USER_ADVERTISE messages are lost
                     if introducer_id in self.servers:
-                        await link.close()
-                        self.add_update_server(introducer_id, self.servers[introducer_id].endpoint, None, self.servers[introducer_id].pubkey)
+                        link.is_bootstrap_handshake = False
+                        # Update the server record to use this connection as persistent
+                        self.add_update_server(introducer_id, self.servers[introducer_id].endpoint, link, self.servers[introducer_id].pubkey)
+                        # Start reading messages from this connection
+                        reader = asyncio.create_task(self._run_server_link(link))
+                        self._track_background_task(reader)
+                        logger.info(f"Transitioned bootstrap connection to {introducer_id[:8]} into persistent link")
                     break  # stop after first successful introducer
             except Exception as e:
                 logger.warning(f"Bootstrap to {url} failed: {e}")
@@ -763,7 +770,7 @@ class SOCPServer:
         logger.debug(f"User {user_id} connected with client {envelope.payload['client']} and pubkey {user_pubkey[:10] if user_pubkey else 'None'}...")
         if user_pubkey:
             try:
-                self.public_channel.add_member(user_id, user_pubkey)
+                self.public_channel.add_update_member(user_id, user_pubkey)
                 
                 # Broadcast PUBLIC_CHANNEL_ADD to network per SOCP §9.3
                 # Per spec: "to":"*" broadcast only, no direct messages
@@ -809,7 +816,12 @@ class SOCPServer:
         # Include pubkey in meta per SOCP §8.2
         meta_with_pubkey = envelope.payload.get("meta", {}).copy()
         meta_with_pubkey["pubkey"] = user_pubkey if user_pubkey else ""
-        logger.info(f"Broadcasting USER_ADVERTISE for {user_id[:8]}, has_pubkey={bool(user_pubkey)}, pubkey_len={len(user_pubkey) if user_pubkey else 0}")
+        
+        if user_pubkey:
+            logger.info(f"Broadcasting USER_ADVERTISE for {user_id[:8]}, has_pubkey=True, pubkey_len={len(user_pubkey)}")
+        else:
+            logger.info(f"Broadcasting USER_ADVERTISE for {user_id[:8]}, has_pubkey=False")
+        
         await self.broadcast_user_advertise(user_id, meta_with_pubkey)
     
     async def handle_server_hello_join(self, connection: ConnectionLink, envelope: Envelope) -> None:
@@ -908,7 +920,13 @@ class SOCPServer:
             welcome_payload
         )
         await connection.send_message(welcome_envelope)
-        await self.cleanup_connection(connection)
+        
+        # ✅ FIX: Don't close the bootstrap connection immediately!
+        # Keep it open as a persistent connection until a proper bidirectional link is established.
+        # This prevents broadcast gaps where messages are lost.
+        connection.is_bootstrap_handshake = False
+        logger.info(f"Keeping bootstrap connection open for {assigned_server_id[:8]}, will serve as persistent link")
+        
         # Broadcast SERVER_ANNOUNCE to all other servers
         await self.broadcast_server_announce(assigned_server_id, envelope.payload)
 
@@ -1048,23 +1066,54 @@ class SOCPServer:
             envelope: The envelope to broadcast
             exclude_server: Optional server_id to exclude from forwarding (for gossip loop prevention)
         """
+        # Count successful sends for debugging
+        servers_sent = 0
+        clients_sent = 0
+        
+        # DEBUG: Log all available server connections
+        all_links = list(self.all_server_connection_links)
+        logger.debug(
+            f"[RELAY] Broadcasting {envelope.type}, "
+            f"found {len(all_links)} server link(s), "
+            f"server_ids: {[getattr(link, 'server_id', 'NO_ID')[:8] if getattr(link, 'server_id', None) else 'NO_ID' for link in all_links]}"
+        )
+        
         # Send to all connected servers (with optional exclusion)
         for server_link in self.all_server_connection_links:
             if exclude_server and server_link.server_id == exclude_server:
+                logger.debug("Skipping broadcast to excluded server %s", server_link.server_id[:8] if server_link.server_id else "unknown")
                 continue
-            await server_link.send_message(envelope)
+            try:
+                await server_link.send_message(envelope)
+                servers_sent += 1
+                logger.debug("Sent %s to server %s", envelope.type, server_link.server_id[:8] if server_link.server_id else "unknown")
+            except Exception as e:
+                logger.warning("Failed to send %s to server %s: %s", envelope.type, server_link.server_id[:8] if server_link.server_id else "unknown", e)
         
         # Relay to all local clients per SOCP §8.2: "which relays to all clients"
         for user_record in self.connected_local_users.values():
             if user_record.link is not None:
-                await user_record.send_message(envelope)
+                try:
+                    await user_record.send_message(envelope)
+                    clients_sent += 1
+                except Exception as e:
+                    logger.warning("Failed to send %s to user %s: %s", envelope.type, user_record.id[:8], e)
         
-        logger.debug(
-            f"Relayed {envelope.type} to network (excluded server: {exclude_server})"
+        logger.info(
+            "Relayed %s to network: %d servers, %d clients (excluded server: %s)",
+            envelope.type, servers_sent, clients_sent,
+            exclude_server[:8] if exclude_server else "None"
         )
     
     async def broadcast_user_advertise(self, user_id: str, meta: Dict[str, Any]) -> None:
         """Broadcast USER_ADVERTISE to all connected servers"""
+        # DEBUG: Show server registry state
+        logger.debug(
+            f"[BROADCAST] USER_ADVERTISE for {user_id[:8]}, "
+            f"Known servers: {list(self.servers.keys())}, "
+            f"Connected: {[sid[:8] for sid, srv in self.servers.items() if srv.is_connected()]}"
+        )
+        
         payload = {
             "user_id": user_id,
             "server_id": self.local_server.id,
@@ -1099,11 +1148,11 @@ class SOCPServer:
     
     async def broadcast_public_channel_updated(self) -> None:
         """Broadcast PUBLIC_CHANNEL_UPDATED with current version and member list per SOCP §9.3"""
-        members = self.public_channel.channel.get_member_info_list()
+        wraps_list = self.public_channel.channel.get_member_wrapped_list()
         
         payload = {
             "version": self.public_channel.channel.version,
-            "members": members,
+            "wraps": wraps_list,
         }
         envelope = create_envelope(
             MessageType.PUBLIC_CHANNEL_UPDATED.value,
@@ -1113,7 +1162,7 @@ class SOCPServer:
         )
         await self._relay_broadcast_to_network(envelope)
         logger.info(
-            f"Broadcasted PUBLIC_CHANNEL_UPDATED version={self.public_channel.channel.version} with {len(members)} members"
+            f"Broadcasted PUBLIC_CHANNEL_UPDATED version={self.public_channel.channel.version} with {len(wraps_list)} wraps"
         )
     
     async def broadcast_server_announce(self, server_id: str, server_info: Dict[str, Any]) -> None:

@@ -47,7 +47,12 @@ class UserRecord:
     def is_remote(self) -> bool:
         return self.location != "local" and is_uuid_v4(self.location)
     def is_connected(self) -> bool:
-        return self.link is not None
+        """Check if user is connected (either locally or on a remote server)."""
+        # Local users: must have a link
+        if self.location == "local":
+            return self.link is not None
+        # Remote users: must have a valid server location
+        return is_uuid_v4(self.location)   
     async def send_message(self, envelope: Envelope) -> None:
         if self.link is None:
             raise ValueError("User is not connected")

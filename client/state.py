@@ -23,6 +23,7 @@ class InboundFile:
     name: str
     size: int
     sha256: str
+    mode: str = "dm"  # "dm" or "public"
     chunks: Dict[int, bytes] = field(default_factory=dict)
 
     def write(self, index: int, data: bytes) -> None:

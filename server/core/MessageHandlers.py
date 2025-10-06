@@ -138,6 +138,7 @@ class GenericRouters:
         payload: Dict[str, Any],
         message_type: str,
         exclude_sender: bool = True,
+        server_deliver_envelope: Optional[Envelope] = None,
     ) -> bool:
         """
         Generic routing for public channel messages to all members.
@@ -145,10 +146,11 @@ class GenericRouters:
         Handles:
         - Authorization check (sender must be member)
         - Local delivery to all local members
-        - Broadcasting to other servers
+        - Broadcasting to other servers (wrapped in SERVER_DELIVER if provided)
         
         Args:
             exclude_sender: If True, don't echo back to sender (default for chat)
+            server_deliver_envelope: Pre-wrapped SERVER_DELIVER envelope for server forwarding
         
         Returns True if successfully routed, False otherwise.
         """
@@ -181,14 +183,20 @@ class GenericRouters:
                     logger.debug("Delivered %s to local member %s", message_type, member_id)
         
         # Broadcast to all other servers
-        broadcast_env = create_envelope(
-            message_type,
-            sender_id,
-            "*",
-            payload,
-        )
-        for link in server.all_server_connection_links:
-            await link.send_message(broadcast_env)
+        if server_deliver_envelope:
+            # Use pre-wrapped SERVER_DELIVER for server-to-server forwarding
+            for link in server.all_server_connection_links:
+                await link.send_message(server_deliver_envelope)
+        else:
+            # Fallback: send raw envelope (for MSG_PUBLIC_CHANNEL which handles its own wrapping)
+            broadcast_env = create_envelope(
+                message_type,
+                sender_id,
+                "*",
+                payload,
+            )
+            for link in server.all_server_connection_links:
+                await link.send_message(broadcast_env)
         
         logger.info("Broadcasted %s from %s to public channel (%d members)", message_type, sender_id, len(members))
         return True
@@ -316,6 +324,9 @@ class ServerMessageHandlers:
         user_id = payload.get("user_id")
         server_id = payload.get("server_id")
         
+        # DEBUG: Log that we received this message
+        logger.info(f"[RECEIVED] {msg_type} from server {origin_server_id[:8] if origin_server_id else 'unknown'} for user {user_id[:8] if isinstance(user_id, str) else user_id}")
+        
         if not (isinstance(user_id, str) and isinstance(server_id, str)):
             await connection.on_error_bad_key(f"Malformed {msg_type} payload", to_id=origin_server_id)
             return
@@ -329,8 +340,8 @@ class ServerMessageHandlers:
         
         # Verify signature before mutating shared state
         if not server._verify_server_signature(origin_server_id, envelope):
-            logger.warning(
-                "Rejected %s from %s due to signature mismatch",
+            logger.error(
+                "[SIG FAIL] Rejected %s from %s due to signature mismatch",
                 msg_type,
                 origin_server_id,
             )
@@ -338,6 +349,8 @@ class ServerMessageHandlers:
                 f"Signature verification failed for {msg_type}", to_id=origin_server_id
             )
             return
+        
+        logger.debug(f"[SIG OK] Signature verified for {msg_type} from {origin_server_id[:8]}")
         
         if server_id != origin_server_id:
             logger.debug(
@@ -350,10 +363,26 @@ class ServerMessageHandlers:
         # Update user presence
         if msg_type == MessageType.USER_ADVERTISE.value:
             server.add_update_user(user_id, None, server_id)
+            
+            # Extract and store pubkey from meta per SOCP §8.2 and §15.1
+            meta = payload.get("meta", {})
+            if meta is not None:
+                user_pubkey = meta.get("pubkey", "")
+                if user_pubkey:
+                    server.public_channel.add_update_member(user_id, user_pubkey)
+                    logger.debug(f"Stored pubkey for remote user {user_id[:8]} (len={len(user_pubkey)})")
+                else:
+                    # Add user to channel without pubkey (tracking only)
+                    server.public_channel.add_update_member(user_id, "")
+                    logger.debug(f"Added remote user {user_id[:8]} to public channel without pubkey")
+                
+            logger.info(f"Added user {user_id[:8]} to users table with location={server_id[:8]}, total_users={len(server.users)}")
         elif msg_type == MessageType.USER_REMOVE.value: # USER_REMOVE
             rec = server.users.get(user_id)
             if getattr(rec, "location", None) == server_id:
                 del server.users[user_id]
+                server.public_channel.remove_member(user_id)
+                logger.info(f"Removed user {user_id[:8]} from users table, total_users={len(server.users)}")
         
         # Forward to other servers and relay to local clients (exclude origin to prevent loops)
         await server._relay_broadcast_to_network(envelope, exclude_server=origin_server_id)
@@ -448,12 +477,47 @@ class ServerMessageHandlers:
         if wrapped_type == MessageType.FILE_END.value:
             await UserFileTransferHandlers.handle_file_end(server, connection, envelope)
             return
-        if wrapped_type == MessageType.MSG_PUBLIC_CHANNEL.value:
-            await UserMessageHandlers.handle_msg_public_channel(server, connection, envelope)
-            return
+        # Note: MSG_PUBLIC_CHANNEL is NOT wrapped in SERVER_DELIVER - it's sent directly
+        # and handled by handle_relayed_public_channel instead
         
 
 
+    @staticmethod
+    async def handle_relayed_public_channel(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
+        """
+        Handle MSG_PUBLIC_CHANNEL relayed from another server.
+        
+        Note: MSG_PUBLIC_CHANNEL uses USER content_sig, not server transport_sig.
+        The envelope.from_ is the USER_ID, not a server_id.
+        We don't verify server signature - only check duplicates via content_sig.
+        """
+        sender_id = envelope.from_  # This is the USER who sent the message
+        payload = envelope.payload
+        
+        # Duplicate suppression using content_sig (not envelope.sig)
+        content_sig = payload.get("content_sig")
+        if content_sig:
+            if server.message_cache.is_duplicate(content_sig):
+                logger.debug("Ignoring duplicate MSG_PUBLIC_CHANNEL from user %s", sender_id[:8] if sender_id else "unknown")
+                return
+            server.message_cache.mark_seen(content_sig)
+        else:
+            logger.warning("No content_sig in MSG_PUBLIC_CHANNEL from %s - cannot check duplicates", sender_id[:8] if sender_id else "unknown")
+        
+        # Route to local public channel members (no server signature needed - user already signed via content_sig)
+        logger.info("[PUBLIC RELAY] Received MSG_PUBLIC_CHANNEL from user %s via server link", sender_id[:8] if sender_id else "unknown")
+        
+        # Deliver to local members only (don't rebroadcast to avoid loops)
+        delivered_local = 0
+        for member_id in server.public_channel.get_members():
+            # Don't exclude sender - they might be on this server too
+            user_rec = server.users.get(member_id)
+            if user_rec and user_rec.location == "local" and user_rec.link:
+                await user_rec.link.send_message(envelope)
+                delivered_local += 1
+        
+        logger.info("MSG_PUBLIC_CHANNEL relayed to %d local members", delivered_local)
+    
     @staticmethod
     async def handle_public_channel_add(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
         """
@@ -495,7 +559,7 @@ class ServerMessageHandlers:
                     # Add as remote member with empty pubkey (we don't have it)
                     # In RSA-only mode, this is mainly for presence tracking
                     try:
-                        server.public_channel.add_member(user_id, "")  # Empty pubkey for remote users
+                        server.public_channel.add_update_member(user_id,"")  # Empty pubkey for remote users
                         logger.debug("Tracked remote user %s in public channel", user_id)
                     except Exception as e:
                         logger.debug("Could not track remote user %s: %s", user_id, e)
@@ -512,7 +576,7 @@ class ServerMessageHandlers:
     
     @staticmethod
     async def handle_public_channel_updated(server: "SOCPServer", connection: "ConnectionLink", envelope: Envelope) -> None:
-        """Handle PUBLIC_CHANNEL_UPDATED - channel version and key wraps update."""
+        """Handle PUBLIC_CHANNEL_UPDATED - channel version and member list with pubkeys."""
         origin_server_id = envelope.from_
         payload = envelope.payload
         
@@ -530,15 +594,33 @@ class ServerMessageHandlers:
                 "Signature verification failed for PUBLIC_CHANNEL_UPDATED", to_id=origin_server_id
             )
             return
-        
-        # Extract version and wraps
+        # "payload":{
+        #     "version":2,  // Bumped every time a user is added or some other change occurs
+        #     "wraps":[{"member_id":"id","wrapped_key":"..."},
+        #             {"member_id":"id","wrapped_key":"..."},
+        #             {"member_id":"id","wrapped_key":"..."},
+        #             {"member_id":"id","wrapped_key":"..."}
+        #             ]
+        #     },
+        # Extract version and members list
         version = payload.get("version")
-        wraps = payload.get("wraps", [])
-        
-        if not isinstance(version, int) or not isinstance(wraps, list):
+        wraps = payload.get("wraps", [])  # Legacy field, kept for compatibility
+        if not isinstance(version, int):
             logger.warning("Malformed PUBLIC_CHANNEL_UPDATED from %s", origin_server_id)
             return
-        
+        # Broadcast update when greater version
+        if version > server.public_channel.version:
+            server.public_channel.version = version
+            for wrap in wraps:
+                member_id = wrap.get("member_id")
+                wrapped_key = wrap.get("wrapped_key")
+                if wrapped_key is not None:
+                    server.public_channel.add_update_member(member_id, wrapped_key)
+                else:
+                    if member_id not in server.public_channel.get_members():
+                        server.public_channel.add_update_member(member_id, "")
+                        logger.debug("Updated pubkey for remote user %s", member_id[:8])
+    
         logger.info(
             "PUBLIC_CHANNEL_UPDATED from %s: version=%d, %d wraps",
             origin_server_id,
@@ -676,8 +758,14 @@ class UserMessageHandlers:
         rec = server.users.get(recipient_id)
         remote_server_id = getattr(rec, "location", None)
         if not isinstance(remote_server_id, str):
-            await connection.on_error_user_not_found(f"Recipient {recipient_id} not found", to_id=sender_id)
+            # Debug: Show what users are in the table
+            logger.warning(
+                f"MSG_DIRECT routing failed: recipient {recipient_id[:8]} not in users table. "
+                f"Current users: {[uid[:8] for uid in server.users.keys()]} (total={len(server.users)})"
+            )
+            await connection.on_error_user_not_found(f"Recipient {recipient_id} not connected", to_id=sender_id)
             return
+        logger.debug(f"Routing MSG_DIRECT from {sender_id[:8]} to {recipient_id[:8]} via server {remote_server_id[:8]}")
         remote_env = create_envelope(
             MessageType.SERVER_DELIVER.value,
             server.local_server.id,
@@ -852,6 +940,7 @@ class UserFileTransferHandlers:
                 payload,
                 MessageType.FILE_START.value,
                 exclude_sender=True,  # Don't echo back
+                server_deliver_envelope=server_deliver_envelope,
             )
             logger.info("FILE_START from %s to public: %s (%d bytes)", sender_id, payload["name"], payload["size"])
     
@@ -915,6 +1004,7 @@ class UserFileTransferHandlers:
                 payload,
                 MessageType.FILE_CHUNK.value,
                 exclude_sender=True,
+                server_deliver_envelope=server_deliver_envelope,
             )
             logger.debug("FILE_CHUNK from %s to public: chunk %d", sender_id, payload["index"])
         
@@ -964,6 +1054,7 @@ class UserFileTransferHandlers:
                 payload,
                 MessageType.FILE_END.value,
                 exclude_sender=True,
+                server_deliver_envelope=server_deliver_envelope,
             )
             logger.info("FILE_END from %s to public: file_id=%s", sender_id, file_id)
         
@@ -982,7 +1073,7 @@ SERVER_HANDLER_REGISTRY: Dict[MessageType, MessageHandler] = {
     MessageType.PUBLIC_CHANNEL_ADD: ServerMessageHandlers.handle_public_channel_add,
     MessageType.PUBLIC_CHANNEL_UPDATED: ServerMessageHandlers.handle_public_channel_updated,
     MessageType.PUBLIC_CHANNEL_KEY_SHARE: ServerMessageHandlers.handle_public_channel_key_share,
-    MessageType.MSG_PUBLIC_CHANNEL: ServerMessageHandlers.handle_generic_server_deliver,
+    MessageType.MSG_PUBLIC_CHANNEL: ServerMessageHandlers.handle_relayed_public_channel,  # ✅ Use dedicated handler (no server sig check)
     # File transfer (server-relayed)
     MessageType.FILE_START: ServerMessageHandlers.handle_generic_server_deliver,
     MessageType.FILE_CHUNK: ServerMessageHandlers.handle_generic_server_deliver,

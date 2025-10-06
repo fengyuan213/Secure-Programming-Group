@@ -72,37 +72,24 @@ def run(
         signer = RSAClientContentSigner(kp)
         session = ClientSession(user_id=uid, server_ws_url=server, signer=signer)
         await session.connect()
-        hello_ts = _now_ms()
-        hello_env = create_envelope(
-            "USER_HELLO",
-            uid,
-            (server_id or uid),
-            {
-                "client": "cli-v1",
-                # base64url (no padding) per SOCP
-                "pubkey": kp.public_b64url(),
-                "enc_pubkey": kp.public_b64url(),
-                "meta": {},
-            },
-            ts=hello_ts,
-        )
-        await session.send(hello_env)
-
+        
         presence = Presence()
        
 
         async def default_handler(env):
             if env.type == "USER_ADVERTISE":
                 uid2 = env.payload.get("user_id")
+                server_id = env.payload.get("server_id", "unknown")
                 meta = env.payload.get("meta", {})
                 presence.add(uid2, meta)
                 # Auto-store pubkey if present in meta per SOCP §8.2
-                console.print(f"[dim]USER_ADVERTISE for {uid2[:8]}: meta={list(meta.keys())}[/]")
+                console.print(f"[cyan]USER_ADVERTISE for {uid2[:8]} from server {server_id[:8] if server_id != 'unknown' else server_id}[/cyan]")
+                console.print(f"[dim]  meta keys: {list(meta.keys())}[/]")
                 if "pubkey" in meta and meta["pubkey"]:
                     pubdir.set(uid2, meta["pubkey"])
-                    console.print(f"[dim green]Stored pubkey for {uid2[:8]}[/] key:{meta["pubkey"][:40]}...")
+                    console.print(f"[green]  ✓ Stored pubkey for {uid2[:8]}[/green] (length: {len(meta['pubkey'])})")
                 else:
-                    console.print(f"[dim red]No pubkey in meta for {uid2[:8]}[/]")
+                    console.print(f"[yellow]  ⚠ No pubkey in meta for {uid2[:8]}[/yellow]")
             elif env.type == "USER_REMOVE":
                 uid2 = env.payload.get("user_id")
                 presence.remove(uid2)
@@ -149,14 +136,16 @@ def run(
                     name = env.payload.get("name")
                     size = env.payload.get("size")
                     sha256 = env.payload.get("sha256")
+                    mode = env.payload.get("mode", "dm")
                     if not all([file_id, name, size, sha256]):
                         console.print("[red]Invalid FILE_START: missing fields[/]")
                         return
                     from .state import InboundFile
                     if not hasattr(presence, '_files'):
                         presence._files = {}
-                    presence._files[file_id] = InboundFile(file_id, name, int(size), sha256)
-                    console.print(f"[bold green]Receiving file[/] {name} ({size} bytes) from {env.from_[:8]}...")
+                    presence._files[file_id] = InboundFile(file_id, name, int(size), sha256, mode)
+                    mode_str = "[yellow]public[/yellow]" if mode == "public" else "DM"
+                    console.print(f"[bold green]Receiving {mode_str} file[/] {name} ({size} bytes) from {env.from_[:8]}...")
                 except Exception as e:
                     console.print(f"[red]FILE_START handling error[/]: {e}")
             elif env.type == "FILE_CHUNK":
@@ -171,9 +160,18 @@ def run(
                     if not hasattr(presence, '_files') or file_id not in presence._files:
                         console.print("[red]FILE_CHUNK for unknown file[/]")
                         return
-                    chunk_data = rsa_oaep_decrypt(kp.private_pem, ct)
-                    presence._files[file_id].write(int(index), chunk_data)
-                    console.print(f"[dim]Received chunk {index} for {presence._files[file_id].name}[/]")
+                    
+                    # Decrypt based on mode
+                    file_info = presence._files[file_id]
+                    if file_info.mode == "dm":
+                        chunk_data = rsa_oaep_decrypt(kp.private_pem, ct)
+                    else:  # public mode
+                        import base64
+                        pad = "=" * ((4 - (len(ct) % 4)) % 4)
+                        chunk_data = base64.urlsafe_b64decode(ct + pad)
+                    
+                    file_info.write(int(index), chunk_data)
+                    console.print(f"[dim]Received chunk {index} for {file_info.name}[/]")
                 except Exception as e:
                     console.print(f"[red]FILE_CHUNK handling error[/]: {e}")
             elif env.type == "FILE_END":
@@ -208,8 +206,30 @@ def run(
                 console.print(f"[dim]ACK {env.payload.get('msg_ref')}[/]")
             else:
                 console.print(f"[dim]recv {env.type}[/]")
-        console.print(f"Connected to server, uid:  {uid}")
+        
+        # Start recv_loop BEFORE sending USER_HELLO to avoid missing initial broadcasts
         recv_task = asyncio.create_task(session.recv_loop(default_handler))
+        
+        # Small delay to ensure recv_loop is running
+        await asyncio.sleep(0.1)
+        
+        # Now send USER_HELLO
+        hello_ts = _now_ms()
+        hello_env = create_envelope(
+            "USER_HELLO",
+            uid,
+            (server_id or uid),
+            {
+                "client": "cli-v1",
+                # base64url (no padding) per SOCP
+                "pubkey": kp.public_b64url(),
+                "enc_pubkey": kp.public_b64url(),
+                "meta": {},
+            },
+            ts=hello_ts,
+        )
+        await session.send(hello_env)
+        console.print(f"Connected to server, uid:  {uid}")
 
         try:
             while True:
@@ -280,7 +300,7 @@ def run(
                 if line.startswith("/file "):
                     parts = line.split(" ", 2)
                     if len(parts) < 3:
-                        console.print("Usage: /file <user> <path>")
+                        console.print("Usage: /file <user|public> <path>")
                         continue
                     dest, path = parts[1], parts[2]
                     from pathlib import Path
@@ -288,6 +308,10 @@ def run(
                     if not p.exists():
                         console.print("File not found")
                         continue
+                    
+                    # Determine mode based on destination
+                    mode = "public" if dest == "public" else "dm"
+                    
                     # Manifest
                     import hashlib, math
                     data = p.read_bytes()
@@ -297,19 +321,34 @@ def run(
                         "name": p.name,
                         "size": len(data),
                         "sha256": hashlib.sha256(data).hexdigest(),
-                        "mode": "dm",
+                        "mode": mode,
                     }
                     await session.send(create_envelope("FILE_START", uid, dest, manifest, ts=_now_ms()))
-                    # Chunks (encrypt each with recip RSA)
-                    recip = pubdir.get(dest)
-                    if not recip:
-                        console.print("Recipient pubkey unknown for chunks. Aborting.")
-                        continue
+                    
+                    # Chunks
+                    if mode == "dm":
+                        # DM mode: encrypt each chunk with recipient's RSA key
+                        recip = pubdir.get(dest)
+                        if not recip:
+                            console.print("Recipient pubkey unknown for chunks. Aborting.")
+                            continue
+                    else:
+                        # Public mode: for now, use placeholder encryption (base64)
+                        # NO ENCRTPYT IN PUBLIC FOR NOW AS REQUIREMETN IS UNCLEAR
+                        console.print("[yellow]Note: Public file transfer uses placeholder encryption (demo only)[/yellow]")
+                        recip = None
                     chunk_size = 190
                     total = math.ceil(len(data)/chunk_size)
                     for i in range(total):
                         chunk = data[i*chunk_size:(i+1)*chunk_size]
-                        ct = rsa_oaep_encrypt(recip, chunk)
+                        if mode == "dm":
+                            # DM: encrypt with recipient's RSA key
+                            ct = rsa_oaep_encrypt(recip, chunk)
+                        else:
+                            # Public: placeholder encryption (base64 for demo)
+                            # NO ENCRTPYT IN PUBLIC FOR NOW AS REQUIREMETN IS UNCLEAR
+                            import base64
+                            ct = base64.urlsafe_b64encode(chunk).decode().rstrip("=")
                         ch_payload = {"file_id": file_id, "index": i, "ciphertext": ct}
                         await session.send(create_envelope("FILE_CHUNK", uid, dest, ch_payload, ts=_now_ms()))
                     await session.send(create_envelope("FILE_END", uid, dest, {"file_id": file_id}, ts=_now_ms()))
@@ -317,7 +356,6 @@ def run(
                     continue
                 console.print("Unknown command. Try /list, /pubkey, /tell, /all, /file")
                 continue
-                console.print("Unknown command. /help")
         finally:
             recv_task.cancel()
             await session.close()
