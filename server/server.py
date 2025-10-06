@@ -129,6 +129,9 @@ class SOCPServer:
         
         self.local_server = ServerRecord(id=persisted_id, link=None, endpoint=ServerEndpoint(host=host, port=port), pubkey=self.keypair.public_b64url())
        
+        # Load persisted state from disk
+        self._load_persisted_state()
+        
         logger.info(f"Initialized SOCP Server with ID: {self.local_server.id}")
 
     def _track_background_task(self, task: asyncio.Task) -> None:
@@ -139,6 +142,83 @@ class SOCPServer:
             self._background_tasks.discard(_task)
 
         task.add_done_callback(_discard)
+    
+    def _load_persisted_state(self) -> None:
+        """Load persisted state from disk on server startup."""
+        try:
+            # Load known servers
+            servers_data = self.storage.load_servers()
+            for server_id, server_info in servers_data.items():
+                # Skip ourselves (by ID or by endpoint)
+                if server_id == self.local_server.id:
+                    continue
+                if self._is_self_endpoint(server_info["host"], server_info["port"]):
+                    logger.debug(f"Skipping persisted server {server_id} (self-endpoint {server_info['host']}:{server_info['port']})")
+                    continue
+                    
+                self.add_update_server(
+                    server_id,
+                    ServerEndpoint(host=server_info["host"], port=server_info["port"]),
+                    None,  # No link yet (will reconnect)
+                    server_info["pubkey"]
+                )
+            
+            # Load known users (remote users only - local users will reconnect)
+            users_data = self.storage.load_users()
+            for user_id, user_info in users_data.items():
+                if user_info["location"] != "local":  # Only restore remote users
+                    self.add_update_user(user_id, None, user_info["location"])
+            
+            # Load public channel state
+            channel_data = self.storage.load_public_channel()
+            if channel_data:
+                # Restore channel metadata
+                self.public_channel.channel.group_id = channel_data.get("group_id", "public")
+                self.public_channel.channel.creator_id = channel_data.get("creator_id", "system")
+                self.public_channel.channel.version = channel_data.get("version", 0)
+                self.public_channel.channel.created_at = channel_data.get("created_at", int(time.time() * 1000))
+                self.public_channel.channel.meta = channel_data.get("meta", {})
+                
+                # Restore members
+                from server.core.PublicChannelManager import ChannelMember
+                for member_data in channel_data.get("members", []):
+                    member = ChannelMember(
+                        user_id=member_data["user_id"],
+                        user_pubkey=member_data.get("user_pubkey", ""),
+                        role=member_data.get("role", "member"),
+                        added_at=member_data.get("added_at", int(time.time() * 1000))
+                    )
+                    self.public_channel.channel.members[member.user_id] = member
+            
+            logger.info(
+                f"Loaded persisted state: {len(self.servers)} servers, "
+                f"{len(self.users)} users, "
+                f"{self.public_channel.get_member_count()} public channel members"
+            )
+        except Exception as e:
+            logger.error(f"Failed to load persisted state: {e}", exc_info=True)
+    
+    def _save_state(self) -> None:
+        """Save current state to disk."""
+        try:
+            self.storage.save_all(
+                self.servers,
+                self.users,
+                self.public_channel.channel,
+                self.local_server.id
+            )
+        except Exception as e:
+            logger.error(f"Failed to save state: {e}", exc_info=True)
+    
+    async def _autosave_loop(self) -> None:
+        """Periodically save state to disk."""
+        while True:
+            await asyncio.sleep(self.autosave_interval)
+            try:
+                self._save_state()
+                logger.debug("Autosaved server state")
+            except Exception as e:
+                logger.error(f"Autosave failed: {e}")
 
     async def start_server(self) -> None:
         """Start the WebSocket server"""
@@ -153,7 +233,7 @@ class SOCPServer:
         ):
             logger.info(f"SOCP server listening on ws://{self.local_server.endpoint.host}:{self.local_server.endpoint.port}")
             # Kick off bootstrap and outbound connection maintenance in background
-            for coroutine in (self.bootstrap(), self._connect_loop(), self._health_loop()):
+            for coroutine in (self.bootstrap(), self._connect_loop(), self._health_loop(), self._autosave_loop()):
                 task = asyncio.create_task(coroutine)
                 self._track_background_task(task)
             # Keep server running
@@ -163,6 +243,11 @@ class SOCPServer:
                 logger.info("Server task cancelled")
                 raise RuntimeError("Server cancelled") from exc
             finally:
+                # Save state before shutdown
+                logger.info("Saving state before shutdown...")
+                self._save_state()
+                
+                # Cancel background tasks
                 for task in list(self._background_tasks):
                     task.cancel()
                     
@@ -216,6 +301,20 @@ class SOCPServer:
         if isinstance(entry, ConnectionLink):
             return entry
         return getattr(entry, "link", None)
+
+    def _is_self_endpoint(self, host: str, port: int) -> bool:
+        """Check if the given endpoint points to this server."""
+        # Normalize localhost variants
+        local_variants = {"localhost", "127.0.0.1", "::1", "[::1]"}
+        self_host = self.local_server.endpoint.host
+        
+        # Normalize self host
+        if self_host in local_variants:
+            # If we're on localhost, consider all localhost variants as self
+            return host in local_variants and port == self.local_server.endpoint.port
+        
+        # Otherwise, exact host match
+        return host == self_host and port == self.local_server.endpoint.port
 
 
     def _verify_server_signature(self, server_id: str, envelope: Envelope) -> bool:
@@ -382,7 +481,8 @@ class SOCPServer:
                             # introducer identity from frame
                             introducer_id = welcome.from_
                             if is_uuid_v4(introducer_id):
-                                self.add_update_server(introducer_id, ServerEndpoint(host=host, port=port), link, entry.get("pubkey", ""))
+                                # Don't pass the temporary bootstrap link - let connect_loop establish persistent connection
+                                self.add_update_server(introducer_id, ServerEndpoint(host=host, port=port), None, entry.get("pubkey", ""))
                                  #self.server_addrs[introducer_id] = (host, port)
                                 #if entry.get("pubkey"):
                                 #    self.server_pubkeys[introducer_id] = entry.get("pubkey", "")
@@ -462,9 +562,12 @@ class SOCPServer:
             p = server.endpoint.port
             if server_id == self.local_server.id:
                 continue
+            # Skip if endpoint points to ourselves (prevent self-connection)
+            if self._is_self_endpoint(h, p):
+                logger.debug(f"Skipping self-connection to {h}:{p} (server_id={server_id})")
+                continue
             # If already connected (link present), skip
-            existing = self.servers.get(server_id)
-            if isinstance(existing, ConnectionLink):
+            if server.is_connected():
                 continue
             link: Optional[ConnectionLink] = None
             try:
@@ -695,11 +798,13 @@ class SOCPServer:
             while assigned_server_id in self.servers or assigned_server_id == self.local_server.id:
                 assigned_server_id = str(uuid.uuid4())
 
-        # Register the server
+        # Register the server (but don't save the temporary bootstrap connection)
         connection.connection_type = "server"
         connection.server_id = assigned_server_id
         connection.identified = True
-        self.add_update_server(assigned_server_id, ServerEndpoint(host=envelope.payload["host"], port=envelope.payload["port"]), connection, envelope.payload.get("pubkey", ""))
+        # Don't register the bootstrap connection - it's temporary and will close after handshake
+        # The persistent connection will be established via SERVER_HELLO_LINK
+        self.add_update_server(assigned_server_id, ServerEndpoint(host=envelope.payload["host"], port=envelope.payload["port"]), None, envelope.payload.get("pubkey", ""))
 
         logger.info(f"Server {assigned_server_id} joined from {envelope.payload['host']}:{envelope.payload['port']}")
 
@@ -980,8 +1085,10 @@ class SOCPServer:
             "server_links": server_links,
             "heartbeat_interval": self.heartbeat_interval,
             "heartbeat_timeout": self.heartbeat_timeout,
+            "autosave_interval": self.autosave_interval,
             "message_cache": self.message_cache.stats(),
             "public_channel": self.public_channel.get_channel_state(),
+            "storage": self.storage.get_storage_stats(),
         }
 
 
@@ -1140,7 +1247,7 @@ class SOCPServer:
 async def main():
     """Main entry point"""
     configure_root_logging()
-    server = SOCPServer(storage_path=Path("~/.server").expanduser(), host="localhost", port=8765)
+    server = SOCPServer(storage_path=Path(".server").expanduser(), host="localhost", port=8765)
     await server.start_server()
 if __name__ == "__main__":
     asyncio.run(main())

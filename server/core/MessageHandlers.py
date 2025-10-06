@@ -310,6 +310,13 @@ class ServerMessageHandlers:
             await connection.on_error_bad_key(f"Malformed {msg_type} payload", to_id=origin_server_id)
             return
         
+        # Check for duplicate broadcast (use envelope sig as dedup key for broadcast messages)
+        if envelope.sig:
+            if server.message_cache.is_duplicate(envelope.sig):
+                logger.debug("Ignoring duplicate %s for %s from %s", msg_type, user_id, origin_server_id)
+                return
+            server.message_cache.mark_seen(envelope.sig)
+        
         # Verify signature before mutating shared state
         if not server._verify_server_signature(origin_server_id, envelope):
             logger.warning(
@@ -447,6 +454,13 @@ class ServerMessageHandlers:
         origin_server_id = envelope.from_
         payload = envelope.payload
         
+        # Check for duplicate broadcast (use envelope sig as dedup key for broadcast messages)
+        if envelope.sig:
+            if server.message_cache.is_duplicate(envelope.sig):
+                logger.debug("Ignoring duplicate PUBLIC_CHANNEL_ADD from %s", origin_server_id)
+                return
+            server.message_cache.mark_seen(envelope.sig)
+        
         # Verify signature
         if not server._verify_server_signature(origin_server_id, envelope):
             logger.warning("PUBLIC_CHANNEL_ADD failed signature from %s", origin_server_id)
@@ -491,6 +505,13 @@ class ServerMessageHandlers:
         """Handle PUBLIC_CHANNEL_UPDATED - channel version and key wraps update."""
         origin_server_id = envelope.from_
         payload = envelope.payload
+        
+        # Check for duplicate broadcast (use envelope sig as dedup key for broadcast messages)
+        if envelope.sig:
+            if server.message_cache.is_duplicate(envelope.sig):
+                logger.debug("Ignoring duplicate PUBLIC_CHANNEL_UPDATED from %s", origin_server_id)
+                return
+            server.message_cache.mark_seen(envelope.sig)
         
         # Verify signature
         if not server._verify_server_signature(origin_server_id, envelope):

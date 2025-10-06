@@ -40,7 +40,29 @@ pip install -e .
 python -m server.server
 
 # Run the test client (from project root directory, in another terminal)
-python -m client.client
+
+python -m client.socp_cli run [OPTIONS]
+
+Options:
+  --server TEXT       WebSocket URL of local server [default: ws://localhost:8765]
+  --user-id TEXT      UUIDv4 user id; generated if omitted
+  --server-id TEXT    UUIDv4 of local server if known
+  --help             Show this message and exit
+# 1. Quick test with auto-generated user ID
+python -m client.socp_cli run --server ws://localhost:8767
+
+# 2. Persistent identity (same user ID across sessions)
+python -m client.socp_cli run --server ws://localhost:8767 --user-id alice-uuid-here
+
+# 3. Connect to production server
+python -m client.socp_cli run --server ws://production.example.com:8765
+
+# 4. Local development with multiple clients
+# Terminal 1 (Alice on Server 1):
+python -m client.socp_cli run --server ws://localhost:8765 --user-id alice-id
+
+# Terminal 2 (Bob on Server 2):
+python -m client.socp_cli run --server ws://localhost:8767 --user-id bob-id
 ```
 
 on startup, you may see 'bootstrap failed' messages. This is normal, it is attempting to connect to the servers listed in the bootstrap.yaml file, and since those servers are not running, bootstrap will fail.
