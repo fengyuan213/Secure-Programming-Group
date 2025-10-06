@@ -334,7 +334,7 @@ def run(
                             continue
                     else:
                         # Public mode: for now, use placeholder encryption (base64)
-                        # NO ENCRTPYT IN PUBLIC FOR NOW AS REQUIREMETN IS UNCLEAR
+                        # TODO: In production, use public channel AES key
                         console.print("[yellow]Note: Public file transfer uses placeholder encryption (demo only)[/yellow]")
                         recip = None
                     chunk_size = 190
@@ -346,9 +346,9 @@ def run(
                             ct = rsa_oaep_encrypt(recip, chunk)
                         else:
                             # Public: placeholder encryption (base64 for demo)
-                            # NO ENCRTPYT IN PUBLIC FOR NOW AS REQUIREMETN IS UNCLEAR
+                            # TODO: Use public channel AES key in production
                             import base64
-                            ct = base64.urlsafe_b64encode(chunk).decode().rstrip("=")
+                            ct = rsa_oaep_encrypt(recip, chunk)
                         ch_payload = {"file_id": file_id, "index": i, "ciphertext": ct}
                         await session.send(create_envelope("FILE_CHUNK", uid, dest, ch_payload, ts=_now_ms()))
                     await session.send(create_envelope("FILE_END", uid, dest, {"file_id": file_id}, ts=_now_ms()))

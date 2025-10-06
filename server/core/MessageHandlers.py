@@ -138,7 +138,6 @@ class GenericRouters:
         payload: Dict[str, Any],
         message_type: str,
         exclude_sender: bool = True,
-        server_deliver_envelope: Optional[Envelope] = None,
     ) -> bool:
         """
         Generic routing for public channel messages to all members.
@@ -146,11 +145,10 @@ class GenericRouters:
         Handles:
         - Authorization check (sender must be member)
         - Local delivery to all local members
-        - Broadcasting to other servers (wrapped in SERVER_DELIVER if provided)
+        - Broadcasting to other servers
         
         Args:
             exclude_sender: If True, don't echo back to sender (default for chat)
-            server_deliver_envelope: Pre-wrapped SERVER_DELIVER envelope for server forwarding
         
         Returns True if successfully routed, False otherwise.
         """
@@ -183,20 +181,14 @@ class GenericRouters:
                     logger.debug("Delivered %s to local member %s", message_type, member_id)
         
         # Broadcast to all other servers
-        if server_deliver_envelope:
-            # Use pre-wrapped SERVER_DELIVER for server-to-server forwarding
-            for link in server.all_server_connection_links:
-                await link.send_message(server_deliver_envelope)
-        else:
-            # Fallback: send raw envelope (for MSG_PUBLIC_CHANNEL which handles its own wrapping)
-            broadcast_env = create_envelope(
-                message_type,
-                sender_id,
-                "*",
-                payload,
-            )
-            for link in server.all_server_connection_links:
-                await link.send_message(broadcast_env)
+        broadcast_env = create_envelope(
+            message_type,
+            sender_id,
+            "*",
+            payload,
+        )
+        for link in server.all_server_connection_links:
+            await link.send_message(broadcast_env)
         
         logger.info("Broadcasted %s from %s to public channel (%d members)", message_type, sender_id, len(members))
         return True
@@ -940,7 +932,6 @@ class UserFileTransferHandlers:
                 payload,
                 MessageType.FILE_START.value,
                 exclude_sender=True,  # Don't echo back
-                server_deliver_envelope=server_deliver_envelope,
             )
             logger.info("FILE_START from %s to public: %s (%d bytes)", sender_id, payload["name"], payload["size"])
     
@@ -1004,7 +995,6 @@ class UserFileTransferHandlers:
                 payload,
                 MessageType.FILE_CHUNK.value,
                 exclude_sender=True,
-                server_deliver_envelope=server_deliver_envelope,
             )
             logger.debug("FILE_CHUNK from %s to public: chunk %d", sender_id, payload["index"])
         
@@ -1054,7 +1044,6 @@ class UserFileTransferHandlers:
                 payload,
                 MessageType.FILE_END.value,
                 exclude_sender=True,
-                server_deliver_envelope=server_deliver_envelope,
             )
             logger.info("FILE_END from %s to public: file_id=%s", sender_id, file_id)
         
