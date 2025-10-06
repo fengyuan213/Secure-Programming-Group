@@ -29,6 +29,7 @@ python -m venv .venv
 source .venv/bin/activate
 
 # Install the package in editable mode
+pip install -r requirements.txt
 pip install -e .
 ```
 
@@ -48,14 +49,15 @@ Options:
   --user-id TEXT      UUIDv4 user id; generated if omitted
   --server-id TEXT    UUIDv4 of local server if known
   --help             Show this message and exit
+
+# run the client and connect to default server
+python -m client.socp_cli run 
 # 1. Quick test with auto-generated user ID
 python -m client.socp_cli run --server ws://localhost:8767
 
 # 2. Persistent identity (same user ID across sessions)
 python -m client.socp_cli run --server ws://localhost:8767 --user-id alice-uuid-here
 
-# 3. Connect to production server
-python -m client.socp_cli run --server ws://production.example.com:8765
 
 # 4. Local development with multiple clients
 # Terminal 1 (Alice on Server 1):
@@ -67,27 +69,20 @@ python -m client.socp_cli run --server ws://localhost:8767 --user-id bob-id
 
 on startup, you may see 'bootstrap failed' messages. This is normal, it is attempting to connect to the servers listed in the bootstrap.yaml file, and since those servers are not running, bootstrap will fail.
 
-To test the bootstrap functionality, you need to clone the folder and then run run_2nd_server.py inside that directory. full guide is in tests/bootstrap_guide.md
+For multiple servers,you need to edit the bootstrap.yml in the `/server`  folder and then configure and run `run_2nd_server.py` inside that directory.
+for example
+`python -m server.server` for first server and `python run_2nd_server.py` for another server. first server data directory is `.server` second data directory is `.server2`
 
 #### Production using Installed Package (if you used pip install -e .)
-
+you can run in prodution executable after running pip install -e .
 ```bash
-# Start the server
-socp-server
+# Start the server data directory is `.server` in current running directory 
+socp-server 
 
-# Run the test client (in another terminal)
+# Run the test client (in another terminal) data stored in `.socp` in current running directory
 socp-client
 ```
 
 
-## Testing First-Message Identification
 
-The test client will demonstrate both user and server connection flows:
-
-This will:
-1. Connect as a **User** with `USER_HELLO` message
-2. Connect as a **Server** with `SERVER_HELLO_JOIN` message
-
-### Testing bootstrap (Server ↔ Server Protocol)
-full guide is in tests/bootstrap_guide.md
 ```
