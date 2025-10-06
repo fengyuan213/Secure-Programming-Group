@@ -2,19 +2,39 @@
 
 This is a Python implementation of the Secure Overlay Chat Protocol (SOCP) version 1.3.
 
+Group 56
+- Fengyuan Liu a1835007 (.fenguan on discord)
+- Jamie Siggurs a1886269
+- Vu Nguyen a1848491
+- Dineth Wickramasekara a1894205
+
+Feel free to contact any of the members to discuss any part of the application.
+
 ## Project Structure
 
 ```
-├── server/                 # SOCP Server implementation
-│   ├── server.py          # Main WebSocket server (S0.1 & S0.2)
-│   ├── identity/ids.py    # UUID generation and validation
-│   └── transport/         # Transport layer components
-├── client/                 # SOCP Client implementation  
-│   └── client.py          # Test client for first-message identification
-├── shared/                 # Shared components
-│   ├── envelope.py        # Message envelope validation
-│   └── utils.py           # Validation utilities
-└── requirements.txt       # Python dependencies
+├── client/                     # Command-line SOCP client
+│   ├── socp_cli.py             # Click entry point and command loop
+│   ├── ws_client.py            # WebSocket session helpers
+│   ├── state.py                # Local keystore and presence cache
+│   ├── pubdir.py               # Public key directory management
+│   ├── client.py               # Legacy demo client wrapper
+│   └── test_golden.py          # Golden Bob→Alice messaging test
+├── server/                     # Federation-ready SOCP server
+│   ├── server.py               # Async WebSocket server entry point
+│   ├── bootstrap.yaml          # Default peer bootstrap list
+│   ├── storage.py              # Persistent server identity helpers
+│   ├── identity/               # UUID utilities and validation
+│   └── core/                   # Message handlers and in-memory tables
+├── shared/                     # Client/server shared logic
+│   ├── envelope.py             # Frame envelope codec & validation
+│   ├── utils.py                # Common validation helpers
+│   ├── log.py                  # Structured logging helpers
+│   └── crypto/                 # RSA/OAEP/PSS crypto abstractions
+│ 
+├── run_2nd_server.py           # Helper for local multi-server testing
+├── requirements.txt            # Python dependencies
+└── setup.py                    # Editable-install configuration
 ```
 
 ### Option 1: Install as Editable Package (Recommended)
@@ -52,6 +72,7 @@ Options:
 
 # run the client and connect to default server
 python -m client.socp_cli run 
+
 # 1. Quick test with auto-generated user ID
 python -m client.socp_cli run --server ws://localhost:8767
 
@@ -67,14 +88,29 @@ python -m client.socp_cli run --server ws://localhost:8765 --user-id alice-id
 python -m client.socp_cli run --server ws://localhost:8767 --user-id bob-id
 ```
 
-on startup, you may see 'bootstrap failed' messages. This is normal, it is attempting to connect to the servers listed in the bootstrap.yaml file, and since those servers are not running, bootstrap will fail.
+### Client Commands
 
-For multiple servers,you need to edit the bootstrap.yml in the `/server`  folder and then configure and run `run_2nd_server.py` inside that directory.
-for example
-`python -m server.server` for first server and `python run_2nd_server.py` for another server. first server data directory is `.server` second data directory is `.server2`
+The interactive shell accepts the following commands:
+
+- `/list` – Display currently known users from the presence cache.
+- `/pubkey set <user-id> <b64url>` – Record or update a recipient public key.
+- `/pubkey list` – Show stored public keys.
+- `/tell <user-id> <message>` – Send an end-to-end encrypted direct message.
+- `/all <message>` – Broadcast to the shared channel.
+- `/file <user-id> <path>` – Initiate an encrypted, chunked file transfer.
+- `/help` – Print command help.
+- `/quit` – Exit the client.
+
+On server startup, you may see 'bootstrap failed' messages. This is normal, it is attempting to connect to the servers listed in the bootstrap.yaml file, and since those servers are not running, bootstrap will fail.
+
+For multiple servers, you need to edit the bootstrap.yml in the `/server` folder and then configure and `run_2nd_server.py` inside that directory. For example, 
+- `python -m server.server` for first server 
+- and `python run_2nd_server.py` for another server. 
+- first server data directory is `.server` second data directory is `.server2`
+
 
 #### Production using Installed Package (if you used pip install -e .)
-you can run in prodution executable after running pip install -e .
+You can run in production executable after running `pip install -e`
 ```bash
 # Start the server data directory is `.server` in current running directory 
 socp-server 
@@ -85,4 +121,3 @@ socp-client
 
 
 
-```
