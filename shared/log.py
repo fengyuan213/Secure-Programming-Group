@@ -120,7 +120,6 @@ def _configure_logger(logger: logging.Logger, level: Optional[str] = None) -> No
     
     # Environment detection
     is_development = _is_development()
-    print(f"support colour: {_supports_color()}"   )
     if is_development:
      
         _add_file_handler(logger)
@@ -157,7 +156,7 @@ def _is_development() -> bool:
 def _add_console_handler(logger: logging.Logger, colored: bool = True) -> None:
     """Add console handler with appropriate formatter"""
     
-    fmt='[%(levelname)-8s][%(asctime)s][%(name)-5s]: %(message)s'
+    fmt='%(asctime)s [%(levelname)-8s][%(name)-5s]: %(message)s'
     handler = logging.StreamHandler(sys.stdout)
     
     if colored and _supports_color():
