@@ -37,6 +37,7 @@ class RSAKeypair:
             serialization.Encoding.PEM,
             serialization.PublicFormat.SubjectPublicKeyInfo,
         )
+        print(f"Generated RSA-4096 keypair: private_pem: {private_pem} public_pem: {public_pem}")
         return cls(private_pem=private_pem, public_pem=public_pem)
 
 

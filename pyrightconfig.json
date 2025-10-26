@@ -1,0 +1,12 @@
+{
+    "typeCheckingMode": "basic",
+    "include": ["server","shared","client"],
+    //"exclude": ["build", "node_modules"],
+  "extraPaths": [
+      "./server",          // your source folder
+    // "./.venv/Lib/site-packages" // point directly to site-packages if needed
+    ],
+    "reportMissingImports": "warning",
+    "reportUnusedVariable": "none"
+  }
+  

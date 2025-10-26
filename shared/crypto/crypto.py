@@ -14,15 +14,24 @@ def b64url_to_bytes(s: str) -> bytes:
 
 
 def load_public_key_from_b64url(b64url_pem: str) -> rsa.RSAPublicKey:
-    return serialization.load_pem_public_key(b64url_to_bytes(b64url_pem))
+    key = serialization.load_pem_public_key(b64url_to_bytes(b64url_pem))
+    if not isinstance(key, rsa.RSAPublicKey):
+        raise TypeError(f"Expected RSA public key, got {type(key).__name__}")
+    return key
 
 
 def load_public_key(pem: bytes) -> rsa.RSAPublicKey:
-    return serialization.load_pem_public_key(pem)
+    key = serialization.load_pem_public_key(pem)
+    if not isinstance(key, rsa.RSAPublicKey):
+        raise TypeError(f"Expected RSA public key, got {type(key).__name__}")
+    return key
 
 
 def load_private_key(pem: bytes) -> rsa.RSAPrivateKey:
-    return serialization.load_pem_private_key(pem, password=None)
+    key = serialization.load_pem_private_key(pem, password=None)
+    if not isinstance(key, rsa.RSAPrivateKey):
+        raise TypeError(f"Expected RSA private key, got {type(key).__name__}")
+    return key
 
 
 def rsa_oaep_encrypt(public_key_pem_or_b64url: bytes | str, plaintext: bytes) -> str:

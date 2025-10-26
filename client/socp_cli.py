@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -12,18 +11,19 @@ from typing import Optional
 import typer
 from rich.console import Console
 from rich.table import Table
+from aioconsole import ainput
 
+from shared.crypto.signer import RSAClientContentSigner
 from shared.envelope import create_envelope
-from shared.log import get_logger
-from .keys import RSAKeypair, load_keypair, save_keypair
+from shared.crypto.keys import RSAKeypair, load_keypair, save_keypair
 from .state import Presence
-from .pubdir import PubKeyDirectory
-from .crypto import rsa_oaep_encrypt, rsassa_pss_sign, rsassa_pss_verify, rsa_oaep_decrypt
+from client.pubdir import PubKeyDirectory
+from shared.crypto.crypto import rsa_oaep_encrypt, rsa_oaep_decrypt
 from .ws_client import ClientSession
 
 app = typer.Typer(help="SOCP v1.3 Client CLI")
 console = Console()
-logger = get_logger(__name__)
+
 
 
 def _default_server() -> str:
@@ -58,7 +58,10 @@ def run(
     """Start interactive client loop (placeholder)."""
     uid = user_id or str(uuid.uuid4())
     console.print(f"[bold green]SOCP client starting[/] as {uid[:8]} on {server}")
-    key_path = Path.home() / ".socp" / f"{uid}"
+    key_path = Path.cwd() / ".socp" / f"{uid}"
+    pub_key_dir = Path.cwd() / ".socp" / f"{uid}.json"
+    
+    pubdir = PubKeyDirectory(pub_key_dir)
     kp = load_keypair(key_path)
     if kp is None:
         kp = RSAKeypair.generate()
@@ -66,31 +69,27 @@ def run(
         console.print("Generated new RSA-4096 keypair")
 
     async def main_loop() -> None:
-        session = ClientSession(user_id=uid, server_ws_url=server)
+        signer = RSAClientContentSigner(kp)
+        session = ClientSession(user_id=uid, server_ws_url=server, signer=signer)
         await session.connect()
-        hello_ts = _now_ms()
-        hello_env = create_envelope(
-            "USER_HELLO",
-            uid,
-            (server_id or uid),
-            {
-                "client": "cli-v1",
-                # base64url (no padding) per SOCP
-                "pubkey": kp.public_b64url(),
-                "enc_pubkey": kp.public_b64url(),
-                "meta": {},
-            },
-            ts=hello_ts,
-        )
-        await session.send(hello_env)
-
+        
         presence = Presence()
+       
 
         async def default_handler(env):
             if env.type == "USER_ADVERTISE":
                 uid2 = env.payload.get("user_id")
+                server_id = env.payload.get("server_id", "unknown")
                 meta = env.payload.get("meta", {})
                 presence.add(uid2, meta)
+                # Auto-store pubkey if present in meta per SOCP §8.2
+                console.print(f"[cyan]USER_ADVERTISE for {uid2[:8]} from server {server_id[:8] if server_id != 'unknown' else server_id}[/cyan]")
+                console.print(f"[dim]  meta keys: {list(meta.keys())}[/]")
+                if "pubkey" in meta and meta["pubkey"]:
+                    pubdir.set(uid2, meta["pubkey"])
+                    console.print(f"[green]  ✓ Stored pubkey for {uid2[:8]}[/green] (length: {len(meta['pubkey'])})")
+                else:
+                    console.print(f"[yellow]  ⚠ No pubkey in meta for {uid2[:8]}[/yellow]")
             elif env.type == "USER_REMOVE":
                 uid2 = env.payload.get("user_id")
                 presence.remove(uid2)
@@ -99,16 +98,16 @@ def run(
                 try:
                     ct = env.payload.get("ciphertext", "")
                     sender_pub = env.payload.get("sender_pub", "")
+                    sender_id = env.payload.get("sender", "")
                     sig = env.payload.get("content_sig", "")
-                    if not ct or not sender_pub or not sig:
+                    if not ct or not sender_pub or not sig or not sender_id:
                         console.print("[red]Rejected DM: missing required fields[/]")
                         return
-                    canonical = (ct + env.from_ + env.to + str(env.ts)).encode()
-                    if not rsassa_pss_verify(sender_pub, canonical, sig):
+                    if not RSAClientContentSigner.verify_dm_content(sender_pub, ct, sender_id, uid, env.ts, sig):
                         console.print("[red]Rejected DM: invalid content_sig[/]")
                         return
                     pt = rsa_oaep_decrypt(kp.private_pem, ct).decode()
-                    console.print(f"[bold cyan]DM[/] from {env.from_[:8]}...: {pt}")
+                    console.print(f"[bold cyan]DM[/] from {sender_id[:8]}...: {pt}")
                 except Exception as e:
                     console.print(f"[red]DM handling error[/]: {e}")
             elif env.type == "MSG_PUBLIC_CHANNEL":
@@ -120,8 +119,7 @@ def run(
                     if not ct or not sender_pub or not sig:
                         console.print("[red]Rejected public msg: missing fields[/]")
                         return
-                    canonical = (ct + env.from_ + str(env.ts)).encode()
-                    if not rsassa_pss_verify(sender_pub, canonical, sig):
+                    if not RSAClientContentSigner.verify_public_channel_content(sender_pub, ct, env.from_, env.ts, sig):
                         console.print("[red]Rejected public msg: invalid content_sig[/]")
                         return
                     # For now, assume public channel uses placeholder ciphertext
@@ -138,14 +136,16 @@ def run(
                     name = env.payload.get("name")
                     size = env.payload.get("size")
                     sha256 = env.payload.get("sha256")
+                    mode = env.payload.get("mode", "dm")
                     if not all([file_id, name, size, sha256]):
                         console.print("[red]Invalid FILE_START: missing fields[/]")
                         return
                     from .state import InboundFile
                     if not hasattr(presence, '_files'):
                         presence._files = {}
-                    presence._files[file_id] = InboundFile(file_id, name, int(size), sha256)
-                    console.print(f"[bold green]Receiving file[/] {name} ({size} bytes) from {env.from_[:8]}...")
+                    presence._files[file_id] = InboundFile(file_id, name, int(size), sha256, mode)
+                    mode_str = "[yellow]public[/yellow]" if mode == "public" else "DM"
+                    console.print(f"[bold green]Receiving {mode_str} file[/] {name} ({size} bytes) from {env.from_[:8]}...")
                 except Exception as e:
                     console.print(f"[red]FILE_START handling error[/]: {e}")
             elif env.type == "FILE_CHUNK":
@@ -160,9 +160,18 @@ def run(
                     if not hasattr(presence, '_files') or file_id not in presence._files:
                         console.print("[red]FILE_CHUNK for unknown file[/]")
                         return
-                    chunk_data = rsa_oaep_decrypt(kp.private_pem, ct)
-                    presence._files[file_id].write(int(index), chunk_data)
-                    console.print(f"[dim]Received chunk {index} for {presence._files[file_id].name}[/]")
+                    
+                    # Decrypt based on mode
+                    file_info = presence._files[file_id]
+                    if file_info.mode == "dm":
+                        chunk_data = rsa_oaep_decrypt(kp.private_pem, ct)
+                    else:  # public mode
+                        import base64
+                        pad = "=" * ((4 - (len(ct) % 4)) % 4)
+                        chunk_data = base64.urlsafe_b64decode(ct + pad)
+                    
+                    file_info.write(int(index), chunk_data)
+                    console.print(f"[dim]Received chunk {index} for {file_info.name}[/]")
                 except Exception as e:
                     console.print(f"[red]FILE_CHUNK handling error[/]: {e}")
             elif env.type == "FILE_END":
@@ -184,7 +193,8 @@ def run(
                     # Safe write
                     from pathlib import Path
                     safe_name = "".join(c for c in f.name if c.isalnum() or c in ".-_") or "received_file"
-                    out_path = Path.home() / "Downloads" / safe_name
+                    out_path = Path.cwd() / ".socp" / "downloads" / safe_name
+                    out_path.parent.mkdir(parents=True, exist_ok=True)  # Create directory if it doesn't exist
                     out_path.write_bytes(data)
                     console.print(f"[bold green]Saved file[/] {f.name} to {out_path}")
                     del presence._files[file_id]
@@ -196,12 +206,34 @@ def run(
                 console.print(f"[dim]ACK {env.payload.get('msg_ref')}[/]")
             else:
                 console.print(f"[dim]recv {env.type}[/]")
-
+        
+        # Start recv_loop BEFORE sending USER_HELLO to avoid missing initial broadcasts
         recv_task = asyncio.create_task(session.recv_loop(default_handler))
+        
+        # Small delay to ensure recv_loop is running
+        await asyncio.sleep(0.1)
+        
+        # Now send USER_HELLO
+        hello_ts = _now_ms()
+        hello_env = create_envelope(
+            "USER_HELLO",
+            uid,
+            (server_id or uid),
+            {
+                "client": "cli-v1",
+                # base64url (no padding) per SOCP
+                "pubkey": kp.public_b64url(),
+                "enc_pubkey": kp.public_b64url(),
+                "meta": {},
+            },
+            ts=hello_ts,
+        )
+        await session.send(hello_env)
+        console.print(f"Connected to server, uid:  {uid}")
 
         try:
             while True:
-                line = input(": ").strip()
+                line = (await ainput(": ")).strip()
                 if not line:
                     continue
                 if line in {"/quit", "/exit"}:
@@ -223,11 +255,11 @@ def run(
                     except Exception:
                         console.print("Usage: /pubkey set <uid> <b64url>")
                         continue
-                    PubKeyDirectory().set(target, key)
+                    pubdir.set(target, key)
                     console.print("Saved pubkey")
                     continue
                 if line == "/pubkey list":
-                    for k, v in PubKeyDirectory().all().items():
+                    for k, v in pubdir.all().items():
                         console.print(f"{k[:8]}... {v[:16]}...")
                     continue
                 if line.startswith("/tell "):
@@ -237,17 +269,16 @@ def run(
                     except Exception:
                         console.print("Usage: /tell <user> <message>")
                         continue
-                    recip = PubKeyDirectory().get(dest)
+                    recip = pubdir.get(dest)
                     if not recip:
                         console.print("Recipient pubkey unknown. Use /pubkey set <uid> <b64url>")
                         continue
                     ts = _now_ms()
                     ciphertext = rsa_oaep_encrypt(recip, msg.encode())
-                    canonical = (ciphertext + uid + dest + str(ts)).encode()
                     payload = {
                         "ciphertext": ciphertext,
                         "sender_pub": kp.public_b64url(),
-                        "content_sig": rsassa_pss_sign(kp.private_pem, canonical),
+                        "content_sig": signer.sign_dm_content(ciphertext, uid, dest, ts),
                     }
                     env = create_envelope("MSG_DIRECT", uid, dest, payload, ts=ts)
                     await session.send(env)
@@ -258,11 +289,10 @@ def run(
                     # Placeholder ciphertext for public channel in this milestone
                     import base64
                     ciphertext = base64.urlsafe_b64encode(msg.encode()).decode().rstrip("=")
-                    canonical = (ciphertext + uid + str(ts)).encode()
                     payload = {
                         "ciphertext": ciphertext,
                         "sender_pub": kp.public_b64url(),
-                        "content_sig": rsassa_pss_sign(kp.private_pem, canonical),
+                        "content_sig": signer.sign_public_channel_content(ciphertext, uid, ts),
                     }
                     env = create_envelope("MSG_PUBLIC_CHANNEL", uid, "public", payload, ts=ts)
                     await session.send(env)
@@ -270,7 +300,7 @@ def run(
                 if line.startswith("/file "):
                     parts = line.split(" ", 2)
                     if len(parts) < 3:
-                        console.print("Usage: /file <user> <path>")
+                        console.print("Usage: /file <user|public> <path>")
                         continue
                     dest, path = parts[1], parts[2]
                     from pathlib import Path
@@ -278,6 +308,10 @@ def run(
                     if not p.exists():
                         console.print("File not found")
                         continue
+                    
+                    # Determine mode based on destination
+                    mode = "public" if dest == "public" else "dm"
+                    
                     # Manifest
                     import hashlib, math
                     data = p.read_bytes()
@@ -287,19 +321,34 @@ def run(
                         "name": p.name,
                         "size": len(data),
                         "sha256": hashlib.sha256(data).hexdigest(),
-                        "mode": "dm",
+                        "mode": mode,
                     }
                     await session.send(create_envelope("FILE_START", uid, dest, manifest, ts=_now_ms()))
-                    # Chunks (encrypt each with recip RSA)
-                    recip = PubKeyDirectory().get(dest)
-                    if not recip:
-                        console.print("Recipient pubkey unknown for chunks. Aborting.")
-                        continue
+                    
+                    # Chunks
+                    if mode == "dm":
+                        # DM mode: encrypt each chunk with recipient's RSA key
+                        recip = pubdir.get(dest)
+                        if not recip:
+                            console.print("Recipient pubkey unknown for chunks. Aborting.")
+                            continue
+                    else:
+                        # Public mode: for now, use placeholder encryption (base64)
+                        # TODO: In production, use public channel AES key
+                        console.print("[yellow]Note: Public file transfer uses placeholder encryption (demo only)[/yellow]")
+                        recip = None
                     chunk_size = 190
                     total = math.ceil(len(data)/chunk_size)
                     for i in range(total):
                         chunk = data[i*chunk_size:(i+1)*chunk_size]
-                        ct = rsa_oaep_encrypt(recip, chunk)
+                        if mode == "dm":
+                            # DM: encrypt with recipient's RSA key
+                            ct = rsa_oaep_encrypt(recip, chunk)
+                        else:
+                            # Public: placeholder encryption (base64 for demo)
+                            # TODO: Use public channel AES key in production
+                            import base64
+                            ct = rsa_oaep_encrypt(recip, chunk)
                         ch_payload = {"file_id": file_id, "index": i, "ciphertext": ct}
                         await session.send(create_envelope("FILE_CHUNK", uid, dest, ch_payload, ts=_now_ms()))
                     await session.send(create_envelope("FILE_END", uid, dest, {"file_id": file_id}, ts=_now_ms()))
@@ -307,7 +356,6 @@ def run(
                     continue
                 console.print("Unknown command. Try /list, /pubkey, /tell, /all, /file")
                 continue
-                console.print("Unknown command. /help")
         finally:
             recv_task.cancel()
             await session.close()
@@ -319,7 +367,11 @@ def run(
     asyncio.run(main_loop())
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for console script"""
     app()
+
+if __name__ == "__main__":
+    main()
 
 
